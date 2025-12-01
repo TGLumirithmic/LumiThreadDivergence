@@ -6,96 +6,84 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CUDA_STANDARD 17)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 
-# Set CUDA architectures (adjust based on your GPU)
-# GTX 980 has compute capability 5.2
-# NOTE: tiny-cuda-nn's FullyFusedMLP requires tensor cores (sm_70+)
-# If using GTX 980, you need to use CutlassMLP instead
+# GTX 980 = SM 52
 set(CMAKE_CUDA_ARCHITECTURES 52)
 
 find_package(CUDAToolkit REQUIRED)
 
-# tiny-cuda-nn (assumes it's in external/ directory or installed)
-set(TCNN_BUILD_BENCHMARK OFF CACHE BOOL "" FORCE)
-set(TCNN_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/external/tiny-cuda-nn")
-    add_subdirectory(external/tiny-cuda-nn)
-else()
-    message(STATUS "tiny-cuda-nn not found in external/. Assuming system install.")
-    # For system install, we need to find it or create an interface target
-    if(NOT TARGET tiny-cuda-nn)
-        # Check if installed to system paths
-        find_path(TCNN_INCLUDE_DIR tiny-cuda-nn/common.h
-            PATHS
-                /usr/local/include
-                /opt/tiny-cuda-nn/install/include
-                /opt/tiny-cuda-nn/include
-            NO_DEFAULT_PATH
-        )
-        if(TCNN_INCLUDE_DIR)
-            message(STATUS "Found tiny-cuda-nn headers: ${TCNN_INCLUDE_DIR}")
+# ============================================================
+# tiny-cuda-nn fixed location at /opt/tiny-cuda-nn
+# ============================================================
+set(TCNN_PREFIX /opt/tiny-cuda-nn/)
 
-            # Find the library files
-            find_library(TCNN_LIB tiny-cuda-nn
-                PATHS /opt/tiny-cuda-nn/build
-                NO_DEFAULT_PATH
-            )
-            find_library(TCNN_RESOURCES_LIB tiny-cuda-nn-resources
-                PATHS /opt/tiny-cuda-nn/build
-                NO_DEFAULT_PATH
-            )
-            find_library(FMT_LIB fmt
-                PATHS /opt/tiny-cuda-nn/build/dependencies/fmt
-                NO_DEFAULT_PATH
-            )
+set(TCNN_INCLUDE_DIR     ${TCNN_PREFIX}/include)
+set(TCNN_DEPS_DIR        ${TCNN_PREFIX}/dependencies)
+set(TCNN_BUILD_DIR       ${TCNN_PREFIX}/build)
 
-            if(TCNN_LIB)
-                message(STATUS "Found tiny-cuda-nn library: ${TCNN_LIB}")
-                add_library(tiny-cuda-nn INTERFACE)
-                target_include_directories(tiny-cuda-nn INTERFACE ${TCNN_INCLUDE_DIR})
-                target_compile_features(tiny-cuda-nn INTERFACE cxx_std_17)
+# Library files
+set(TCNN_LIB             ${TCNN_BUILD_DIR}/libtiny-cuda-nn.a)
+set(TCNN_RESOURCES_LIB   ${TCNN_BUILD_DIR}/libtiny-cuda-nn-resources.a)
+set(FMT_LIB              ${TCNN_BUILD_DIR}/dependencies/fmt/libfmt.a)
 
-                # Add required compile definitions for tiny-cuda-nn
-                # Note: TCNN_HALF_PRECISION must match how tiny-cuda-nn was built
-                # For GTX 980 (sm_52), use float precision (TCNN_HALF_PRECISION=0)
-                target_compile_definitions(tiny-cuda-nn INTERFACE
-                    TCNN_HALF_PRECISION=0
-                    TCNN_MIN_GPU_ARCH=52
-                )
-
-                # Include tiny-cuda-nn dependencies
-                set(TCNN_DEPS_BASE /opt/tiny-cuda-nn/dependencies)
-                target_include_directories(tiny-cuda-nn INTERFACE
-                    ${TCNN_DEPS_BASE}/fmt/include
-                    ${TCNN_DEPS_BASE}
-                    ${TCNN_DEPS_BASE}/cutlass/include
-                )
-
-                # Link the libraries
-                target_link_libraries(tiny-cuda-nn INTERFACE
-                    ${TCNN_LIB}
-                    ${TCNN_RESOURCES_LIB}
-                    ${FMT_LIB}
-                )
-            else()
-                message(FATAL_ERROR "tiny-cuda-nn library not found in build directory.")
-            endif()
-        else()
-            message(FATAL_ERROR "tiny-cuda-nn headers not found. Please install tiny-cuda-nn.")
-        endif()
-    endif()
+# Basic sanity checking
+if(NOT EXISTS "${TCNN_LIB}")
+    message(FATAL_ERROR "tiny-cuda-nn library not found at: ${TCNN_LIB}")
 endif()
 
-# Output directories
+if(NOT EXISTS "${TCNN_INCLUDE_DIR}/tiny-cuda-nn/common.h")
+    message(FATAL_ERROR "tiny-cuda-nn headers not found at: ${TCNN_INCLUDE_DIR}")
+endif()
+
+# ------------------------------------------------------------
+# Create imported target TCNN::tcnn
+# ------------------------------------------------------------
+add_library(TCNN::tcnn INTERFACE IMPORTED)
+
+target_include_directories(TCNN::tcnn
+    INTERFACE
+        ${TCNN_INCLUDE_DIR}
+        ${TCNN_DEPS_DIR}
+        ${TCNN_DEPS_DIR}/fmt/include
+        ${TCNN_DEPS_DIR}/cutlass/include
+)
+
+# Add required compile definitions for tiny-cuda-nn
+# Note: TCNN_HALF_PRECISION must match how tiny-cuda-nn was built
+# For GTX 980 (sm_52), use float precision (TCNN_HALF_PRECISION=0)
+target_compile_definitions(TCNN::tcnn INTERFACE
+    TCNN_HALF_PRECISION=0               # matches how you built it
+    TCNN_MIN_GPU_ARCH=52                # GTX 980
+)
+target_compile_features(TCNN::tcnn INTERFACE cxx_std_17)
+
+# Link actual libraries
+target_link_libraries(TCNN::tcnn INTERFACE
+    ${TCNN_LIB}
+    ${TCNN_RESOURCES_LIB}
+    ${FMT_LIB}
+)
+
+
+
+message(STATUS "tiny-cuda-nn loaded from ${TCNN_PREFIX}")
+
+# ============================================================
+# Build output dirs
+# ============================================================
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 
-# Include directories
+# ============================================================
+# Global include dirs (not for TCNN)
+# ============================================================
 include_directories(
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}
 )
 
-# Add source files
+# ============================================================
+# Subdirectories
+# ============================================================
 add_subdirectory(src/neural)
 add_subdirectory(tests)

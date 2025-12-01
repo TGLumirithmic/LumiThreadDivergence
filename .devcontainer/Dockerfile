@@ -57,29 +57,6 @@ RUN chmod +x /tmp/optix-installer/NVIDIA-OptiX-SDK-${OPTIX_VERSION}-linux64-x86_
 #     mkdir -p build && cd build && \
 #     cmake ../SDK && make -j$(nproc) install
 
-# Clone and build tiny-cuda-nn for GTX 980 (sm_52)
-# Note: GTX 980 (sm_52) doesn't support half precision in tiny-cuda-nn
-# Must build with TCNN_HALF_PRECISION=OFF to use float precision
-WORKDIR /opt
-RUN git clone --recursive https://github.com/NVlabs/tiny-cuda-nn.git && \
-    cd tiny-cuda-nn && \
-    cmake . -B build \
-        -DCMAKE_BUILD_TYPE=Release \
-        -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc \
-        -DCMAKE_INSTALL_PREFIX=/opt/tiny-cuda-nn/install \
-        -DTCNN_BUILD_BENCHMARK=OFF \
-        -DTCNN_BUILD_EXAMPLES=OFF \
-        -DCMAKE_CUDA_ARCHITECTURES=52 \
-        -DTCNN_MIN_GPU_ARCH=52 \
-        -DTCNN_ENABLE_HALF_PRECISION=OFF \
-        -DTCNN_DISABLE_TENSOR_CORES=ON && \
-    cmake --build build --config Release -j$(nproc) && \
-    cmake --install build && \
-    # Copy to system paths for easier discovery
-    cp -r /opt/tiny-cuda-nn/install/include/tiny-cuda-nn /usr/local/include/ 2>/dev/null || true && \
-    cp -r /opt/tiny-cuda-nn/build/lib*.a /usr/local/lib/ 2>/dev/null || true && \
-    ldconfig
-
 # Stage 2: Development environment
 FROM nvidia/cuda:11.6.1-devel-ubuntu20.04
 
@@ -129,6 +106,26 @@ RUN echo "deb [signed-by=/usr/share/keyrings/kitware-archive-keyring.gpg] https:
 # Install latest CMake
 RUN apt-get update && apt-get install -y cmake
 
+
+# Clone and build tiny-cuda-nn for GTX 980 (sm_52)
+# Note: GTX 980 (sm_52) doesn't support half precision in tiny-cuda-nn
+# Must build with TCNN_HALF_PRECISION=OFF to use float precision
+# Note we don't do a system install as historically this has caused stale versions
+# lingering that get out of sync and cause the project build to fail
+WORKDIR /opt
+RUN git clone --recursive https://github.com/NVlabs/tiny-cuda-nn.git /opt/tiny-cuda-nn && \
+    cd /opt/tiny-cuda-nn && \
+    cmake . -B build \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc \
+        -DTCNN_BUILD_BENCHMARK=OFF \
+        -DTCNN_BUILD_EXAMPLES=OFF \
+        -DCMAKE_CUDA_ARCHITECTURES=52 \
+        -DTCNN_MIN_GPU_ARCH=52 \
+        -DTCNN_ENABLE_HALF_PRECISION=OFF \
+        -DTCNN_DISABLE_TENSOR_CORES=ON && \
+    cmake --build build --config Release -j $(nproc)
+
 # Python packages
 RUN pip3 install --no-cache-dir \
     torch \
@@ -141,7 +138,6 @@ RUN pip3 install --no-cache-dir \
 COPY --from=builder /opt/optix /opt/optix
 
 # Copy tiny-cuda-nn from builder
-COPY --from=builder /opt/tiny-cuda-nn /opt/tiny-cuda-nn
 COPY --from=builder /usr/local/lib/ /usr/local/lib/
 COPY --from=builder /usr/local/include/ /usr/local/include/
 
@@ -149,7 +145,7 @@ RUN ldconfig
 
 # Environment variables
 ENV OptiX_INSTALL_DIR=/opt/optix
-ENV TCNN_DIR=/opt/tiny-cuda-nn
+ENV TCNN_DIR=/opt/tiny-cuda-nn/
 ENV LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
 ENV PATH=/usr/local/cuda/bin:$PATH
 

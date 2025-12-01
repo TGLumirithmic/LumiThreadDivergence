@@ -20,7 +20,7 @@ target_link_libraries(neural_integration PUBLIC
     CUDA::cudart
     CUDA::cuda_driver
     CUDA::nvrtc
-    tiny-cuda-nn
+    TCNN::tcnn
 )
 
 set_target_properties(neural_integration PROPERTIES

@@ -9,7 +9,7 @@ target_include_directories(test_network PRIVATE
 target_link_libraries(test_network PRIVATE
     neural_integration
     CUDA::cudart
-    tiny-cuda-nn
+    TCNN::tcnn
 )
 
 set_target_properties(test_network PROPERTIES
