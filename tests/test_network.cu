@@ -63,17 +63,18 @@ void generate_test_grid(std::vector<float>& positions,
         for (int x = 0; x < width; ++x) {
             int idx = (y * width + x) * 3;
             // Map pixel coordinates to [-1, 1] range
-            positions[idx + 0] = (x / float(width) - 0.5f) * 2.0f;   // x
-            positions[idx + 1] = (y / float(height) - 0.5f) * 2.0f;  // y
+            positions[idx + 0] = x / float(width);   // x
+            positions[idx + 1] = y / float(height);  // y
             positions[idx + 2] = z_plane;                             // z
         }
     }
 }
 
-// Test with ground truth predictions if available
+// Test with ground truth predictions if available (batched)
 void test_with_predictions(neural::NeuralNetwork& network,
-                          const std::string& prediction_file) {
-    std::cout << "\n=== Testing with Ground Truth Predictions ===" << std::endl;
+                          const std::string& prediction_file,
+                          int batch_size = 256) {
+    std::cout << "\n=== Testing with Ground Truth Predictions (Batched) ===" << std::endl;
 
     try {
         neural_proxy::PredictionReader reader(prediction_file);
@@ -90,61 +91,91 @@ void test_with_predictions(neural::NeuralNetwork& network,
         auto samples = reader.read_all();
         std::cout << "Loaded " << samples.size() << " samples" << std::endl;
 
-        // Test a few samples
-        int num_test = std::min(10, (int)samples.size());
-        std::cout << "\nTesting " << num_test << " sample queries:" << std::endl;
+        // Allocate host and device buffers for batch processing
+        std::vector<float> h_positions(batch_size * 3);
+        std::vector<float> h_directions(batch_size * 3);
+        std::vector<float> h_visibility(batch_size);
+        std::vector<float> h_depth(batch_size);
+        std::vector<float> h_normals(batch_size * 3);
 
-        for (int i = 0; i < num_test; ++i) {
-            const auto& sample = samples[i];
+        float* d_positions = cuda_utils::allocate_device<float>(batch_size * 3);
+        float* d_directions = cuda_utils::allocate_device<float>(batch_size * 3);
+        float* d_visibility = cuda_utils::allocate_device<float>(batch_size);
+        float* d_normals = cuda_utils::allocate_device<float>(batch_size * 3);
+        float* d_depth = cuda_utils::allocate_device<float>(batch_size);
+        
+        int total_samples = samples.size();
+        for (int start = 0; start < total_samples; start += batch_size) {
+            int current_batch = std::min(batch_size, total_samples - start);
 
-            // For now, test with ray origins
-            // (Later we'll use actual hit points)
-            float position[3] = {
-                sample.origin[0],
-                sample.origin[1],
-                sample.origin[2]
-            };
+            // Fill host buffers for this batch
+            for (int i = 0; i < current_batch; ++i) {
+                const auto& sample = samples[start + i];
+                h_positions[i * 3 + 0] = sample.origin[0];
+                h_positions[i * 3 + 1] = sample.origin[1];
+                h_positions[i * 3 + 2] = sample.origin[2];
 
-            float direction[3] = {
-                sample.direction[0],
-                sample.direction[1],
-                sample.direction[2]
-            };
-
-            float visibility, depth;
-            float normal[3];
-
-            network.inference_single(position, direction, visibility, normal, depth);
-
-            std::cout << "\nSample " << i << ":" << std::endl;
-            std::cout << "  Position: [" << position[0] << ", " << position[1]
-                     << ", " << position[2] << "]" << std::endl;
-
-            if (header.has_visibility) {
-                float gt_vis = 1.0f / (1.0f + std::exp(-sample.visibility_logit));
-                std::cout << "  Visibility - Predicted: " << visibility
-                         << ", GT: " << gt_vis
-                         << ", Diff: " << std::abs(visibility - gt_vis) << std::endl;
+                h_directions[i * 3 + 0] = sample.direction[0];
+                h_directions[i * 3 + 1] = sample.direction[1];
+                h_directions[i * 3 + 2] = sample.direction[2];
             }
 
-            if (header.has_depth) {
-                std::cout << "  Depth - Predicted: " << depth
-                         << ", GT: " << sample.depth
-                         << ", Diff: " << std::abs(depth - sample.depth) << std::endl;
-            }
+            // Copy to device
+            cuda_utils::copy_to_device(d_positions, h_positions.data(), current_batch * 3);
+            cuda_utils::copy_to_device(d_directions, h_directions.data(), current_batch * 3);
 
-            if (header.has_normal) {
-                std::cout << "  Normal - Predicted: [" << normal[0] << ", "
-                         << normal[1] << ", " << normal[2] << "]" << std::endl;
-                std::cout << "         - GT: [" << sample.normal[0] << ", "
-                         << sample.normal[1] << ", " << sample.normal[2] << "]" << std::endl;
+            // Run batched inference
+            network.inference(d_positions, d_directions, d_visibility, d_normals, d_depth, current_batch);
+            CUDA_SYNC_CHECK();
+
+            // Copy results back
+            cuda_utils::copy_to_host(h_visibility.data(), d_visibility, current_batch);
+            cuda_utils::copy_to_host(h_normals.data(), d_normals, current_batch * 3);
+            cuda_utils::copy_to_host(h_depth.data(), d_depth, current_batch);
+
+            // Print results for first few samples in the batch
+            int print_count = std::min(10, current_batch);
+            for (int i = 0; i < print_count; ++i) {
+                const auto& sample = samples[start + i];
+                std::cout << "\nSample " << (start + i) << ":" << std::endl;
+                std::cout << "  Position: [" << h_positions[i * 3] << ", "
+                          << h_positions[i * 3 + 1] << ", "
+                          << h_positions[i * 3 + 2] << "]" << std::endl;
+
+                if (header.has_visibility) {
+                    float gt_vis = 1.0f / (1.0f + std::exp(-sample.visibility_logit));
+                    std::cout << "  Visibility - Predicted: " << h_visibility[i]
+                              << ", GT: " << gt_vis
+                              << ", Diff: " << std::abs(h_visibility[i] - gt_vis) << std::endl;
+                }
+
+                if (header.has_depth) {
+                    std::cout << "  Depth - Predicted: " << h_depth[i]
+                              << ", GT: " << sample.depth
+                              << ", Diff: " << std::abs(h_depth[i] - sample.depth) << std::endl;
+                }
+
+                if (header.has_normal) {
+                    std::cout << "  Normal - Predicted: [" << h_normals[i * 3] << ", "
+                              << h_normals[i * 3 + 1] << ", " << h_normals[i * 3 + 2] << "]" << std::endl;
+                    std::cout << "         - GT: [" << sample.normal[0] << ", "
+                              << sample.normal[1] << ", " << sample.normal[2] << "]" << std::endl;
+                }
             }
         }
+
+        // Cleanup device memory
+        cuda_utils::free_device(d_positions);
+        cuda_utils::free_device(d_directions);
+        cuda_utils::free_device(d_visibility);
+        cuda_utils::free_device(d_normals);
+        cuda_utils::free_device(d_depth);
 
     } catch (const std::exception& e) {
         std::cerr << "Error testing with predictions: " << e.what() << std::endl;
     }
 }
+
 
 // Simple grid test (no ground truth)
 void test_simple_grid(neural::NeuralNetwork& network,

@@ -286,38 +286,85 @@ void NeuralNetwork::inference(
         throw std::runtime_error("Network not initialized");
     }
 
-    // tiny-cuda-nn requires batch sizes to be multiples of 128
-    constexpr uint32_t BATCH_SIZE_GRANULARITY = 128;
     if (batch_size % BATCH_SIZE_GRANULARITY != 0) {
         throw std::runtime_error("Batch size must be a multiple of " + std::to_string(BATCH_SIZE_GRANULARITY));
     }
 
+    if (!stream) CUDA_CHECK(cudaDeviceSynchronize());
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        std::cerr << "[CUDA ERROR] At entry " << cudaGetErrorString(err) << std::endl;
+        throw std::runtime_error("Failed at inference start");
+    }
+
+    std::cout << "[INFO] Starting inference, batch_size=" << batch_size << std::endl;
+
     // Allocate encoding buffers if needed
     allocate_buffers(batch_size);
+ 
+    std::cout << "[DEBUG] Allocated buffers: "
+              << "d_encoded_=" << encoded_buffer_size_ 
+              << ", d_dir_input_float_=" << dir_input_float_buffer_size_
+              << ", d_dir_encoded_=" << dir_encoded_buffer_size_
+              << ", d_concatenated_float_=" << concatenated_float_buffer_size_
+              << std::endl;
 
     auto* encoding = reinterpret_cast<Encoding<precision_t>*>(encoding_);
     auto* vis_network = reinterpret_cast<Network<precision_t>*>(visibility_network_);
     auto* norm_network = reinterpret_cast<Network<precision_t>*>(normal_network_);
     auto* depth_network = reinterpret_cast<Network<precision_t>*>(depth_network_);
 
-    // Create GPU matrix views for tiny-cuda-nn
-    // GPUMatrixDynamic expects data in column-major format: [features, batch]
+    encoding->set_jit_fusion(false);
+
     uint32_t pos_encoding_dims = config_.encoding_n_output_dims();
+    uint32_t decoder_input_dims = config_.decoder_input_dims();
 
-    // Step 1: Encode positions using hash encoding
-    // Encoding takes float input and produces float output
-    GPUMatrixDynamic<float> pos_input((float*)d_positions, config_.n_input_dims, batch_size);
+    // Step 1: Encode positions
+    std::cout << "[INFO] Step 1: Position encoding, n_input_dims=" << config_.n_input_dims
+            << ", pos_encoding_dims=" << pos_encoding_dims
+            << ", batch_size=" << batch_size << std::endl;
+
+    // Allocate temporary buffer for positions (same size)
+    float* d_positions_tmp = nullptr;
+    size_t positions_bytes = batch_size * config_.n_input_dims * sizeof(float);
+    CUDA_CHECK(cudaMalloc(&d_positions_tmp, positions_bytes));
+
+    // Try copying d_positions to d_positions_tmp (device-to-device)
+    std::cout << "[DEBUG] Copying d_positions to temporary buffer..." << std::endl;
+    CUDA_CHECK(cudaMemcpy(d_positions_tmp, d_positions, positions_bytes, cudaMemcpyDeviceToDevice));
+    CUDA_CHECK(cudaDeviceSynchronize());
+    std::cout << "[DEBUG] Copy succeeded" << std::endl;
+
+    // Create GPUMatrixDynamic objects using the temporary buffer
+    GPUMatrixDynamic<float> pos_input(d_positions_tmp, config_.n_input_dims, batch_size);
     GPUMatrixDynamic<float> pos_output(d_encoded_, pos_encoding_dims, batch_size);
-    encoding->inference(stream, pos_input, pos_output);
 
-    // Step 2: Encode directions if direction encoder is enabled
+    // Run the encoder
+    std::cout << "[DEBUG] Running encoding->inference..." << std::endl;
+    encoding->inference_mixed_precision_impl(stream, pos_input, pos_output, true);
+    CUDA_CHECK(cudaDeviceSynchronize());
+    std::cout << "[DEBUG] Encoding inference completed" << std::endl;
+
+    // Free temporary buffer
+    CUDA_CHECK(cudaFree(d_positions_tmp));
+
+
+    if (!stream) CUDA_CHECK(cudaDeviceSynchronize());
+    err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        std::cerr << "[CUDA ERROR] After position encoding: " << cudaGetErrorString(err) << std::endl;
+        throw std::runtime_error("Position encoding failed");
+    }
+
+    // Step 2: Encode directions if enabled
     if (config_.use_direction_encoder && direction_encoder_) {
         auto* dir_encoder = reinterpret_cast<Network<precision_t>*>(direction_encoder_);
-
         uint32_t dir_encoding_dims = config_.direction_encoder_n_output_dims();
-
-        // Pad direction input to multiple of 16 (float precision)
         uint32_t padded_dir_input_dims = ((config_.direction_input_dims + 15) / 16) * 16;
+
+        std::cout << "[INFO] Step 2: Pad directions, padded_dir_input_dims=" << padded_dir_input_dims
+                  << ", batch_size=" << batch_size << std::endl;
+
         uint32_t threads = 256;
         uint32_t blocks = (batch_size + threads - 1) / threads;
         pad_direction_kernel_float<<<blocks, threads, 0, stream>>>(
@@ -327,18 +374,29 @@ void NeuralNetwork::inference(
             config_.direction_input_dims,
             padded_dir_input_dims
         );
-        CUDA_CHECK(cudaGetLastError());
+        if (!stream) CUDA_CHECK(cudaDeviceSynchronize());
+        err = cudaGetLastError();
+        if (err != cudaSuccess) {
+            std::cerr << "[CUDA ERROR] After pad_direction_kernel: " << cudaGetErrorString(err) << std::endl;
+            throw std::runtime_error("Pad direction kernel failed");
+        }
 
-        // Direction encoder: float input (padded) -> float output
+        std::cout << "[INFO] Step 2b: Direction encoder inference" << std::endl;
         GPUMatrixDynamic<precision_t> dir_input(d_dir_input_float_, padded_dir_input_dims, batch_size);
         GPUMatrixDynamic<float> dir_output(d_dir_encoded_, dir_encoding_dims, batch_size);
-
-        // Encode directions
         dir_encoder->inference(stream, dir_input, dir_output);
 
-        // Step 3: Concatenate position and direction encodings (float precision)
-        threads = 256;
-        blocks = (batch_size + threads - 1) / threads;
+        if (!stream) CUDA_CHECK(cudaDeviceSynchronize());
+        err = cudaGetLastError();
+        if (err != cudaSuccess) {
+            std::cerr << "[CUDA ERROR] After direction encoder inference: " << cudaGetErrorString(err) << std::endl;
+            throw std::runtime_error("Direction encoder inference failed");
+        }
+
+        // Step 3: Concatenate position + direction encodings
+        std::cout << "[INFO] Step 3: Concatenate encodings, pos=" << pos_encoding_dims
+                  << ", dir=" << dir_encoding_dims << std::endl;
+
         concatenate_encodings_kernel_float<<<blocks, threads, 0, stream>>>(
             d_encoded_,
             d_dir_encoded_,
@@ -347,38 +405,65 @@ void NeuralNetwork::inference(
             pos_encoding_dims,
             dir_encoding_dims
         );
-        CUDA_CHECK(cudaGetLastError());
+        if (!stream) CUDA_CHECK(cudaDeviceSynchronize());
+        err = cudaGetLastError();
+        if (err != cudaSuccess) {
+            std::cerr << "[CUDA ERROR] After concatenate_encodings_kernel: " << cudaGetErrorString(err) << std::endl;
+            throw std::runtime_error("Concatenate encodings kernel failed");
+        }
     } else {
-        // If no direction encoder, just copy position encoding (float precision)
-        uint32_t total_size = batch_size * pos_encoding_dims;
+        // No direction encoder, just copy position encoding
+        std::cout << "[INFO] Step 2: No direction encoder, copying position encoding" << std::endl;
         CUDA_CHECK(cudaMemcpyAsync(
             d_concatenated_float_,
             d_encoded_,
-            total_size * sizeof(float),
+            batch_size * pos_encoding_dims * sizeof(float),
             cudaMemcpyDeviceToDevice,
             stream
         ));
+        if (!stream) CUDA_CHECK(cudaDeviceSynchronize());
+        err = cudaGetLastError();
+        if (err != cudaSuccess) {
+            std::cerr << "[CUDA ERROR] After memcpy of position encoding: " << cudaGetErrorString(err) << std::endl;
+            throw std::runtime_error("Memcpy of position encoding failed");
+        }
     }
 
-    // Step 4: Run through each decoder
-    uint32_t decoder_input_dims = config_.decoder_input_dims();
+    // Step 4: Run decoders
+    std::cout << "[INFO] Step 4: Decoder inference" << std::endl;
 
-    // Decoders take precision_t (float) input
     GPUMatrixDynamic<precision_t> decoder_in(d_concatenated_float_, decoder_input_dims, batch_size);
     GPUMatrixDynamic<float> vis_output(d_visibility, config_.visibility_decoder.n_output_dims, batch_size);
     GPUMatrixDynamic<float> norm_output(d_normals, config_.normal_decoder.n_output_dims, batch_size);
     GPUMatrixDynamic<float> depth_output(d_depth, config_.depth_decoder.n_output_dims, batch_size);
 
-    // Run inference through each decoder network
     vis_network->inference(stream, decoder_in, vis_output);
-    norm_network->inference(stream, decoder_in, norm_output);
-    depth_network->inference(stream, decoder_in, depth_output);
-
-    // Synchronize if no stream provided
-    if (!stream) {
-        CUDA_CHECK(cudaDeviceSynchronize());
+    if (!stream) CUDA_CHECK(cudaDeviceSynchronize());
+    err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        std::cerr << "[CUDA ERROR] After visibility decoder: " << cudaGetErrorString(err) << std::endl;
+        throw std::runtime_error("Visibility decoder failed");
     }
+
+    norm_network->inference(stream, decoder_in, norm_output);
+    if (!stream) CUDA_CHECK(cudaDeviceSynchronize());
+    err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        std::cerr << "[CUDA ERROR] After normal decoder: " << cudaGetErrorString(err) << std::endl;
+        throw std::runtime_error("Normal decoder failed");
+    }
+
+    depth_network->inference(stream, decoder_in, depth_output);
+    if (!stream) CUDA_CHECK(cudaDeviceSynchronize());
+    err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        std::cerr << "[CUDA ERROR] After depth decoder: " << cudaGetErrorString(err) << std::endl;
+        throw std::runtime_error("Depth decoder failed");
+    }
+
+    std::cout << "[INFO] Inference complete for batch_size=" << batch_size << std::endl;
 }
+
 
 void NeuralNetwork::inference_single(
     const float* position,
