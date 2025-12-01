@@ -1,0 +1,55 @@
+# Build artifacts
+build/
+!build/.gitkeep
+
+# Output images
+output/*
+!output/.gitkeep
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+*.cmake
+!CMakeLists.txt
+
+# Generated files
+*.ptx
+*.o
+*.a
+
+# Large binary files
+*.pth
+*.ckpt
+*.bin
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Docker
+.devcontainer/docker/*.sh
+.devcontainer/docker/Dockerfile.original
+
+# Development containers (keep config, ignore installers)
+*.tar.gz
+*.deb
+*.run

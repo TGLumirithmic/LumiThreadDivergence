@@ -1,0 +1,61 @@
+version: '3.8'
+
+services:
+  neural-optix-dev:
+    # Use a clean, usable image name
+    image: neural-optix-renderer:latest
+
+    build:
+      context: ..
+      dockerfile: .devcontainer/Dockerfile
+      args:
+        OPTIX_VERSION: "7.7.0"
+        USERNAME: developer
+        USER_UID: 1000
+        USER_GID: 1000
+      tags:
+        - neural-optix-renderer:latest
+        - neural-optix-renderer:phase1
+
+    # Container name for easy reference
+    container_name: neural-optix-dev
+
+    # GPU access
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu, compute, utility]
+
+    # Security settings for debugging
+    cap_add:
+      - SYS_PTRACE
+    security_opt:
+      - seccomp:unconfined
+
+    # Environment variables
+    environment:
+      - OptiX_INSTALL_DIR=/opt/optix
+      - TCNN_DIR=/opt/tiny-cuda-nn
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics
+
+    # Mount workspace
+    volumes:
+      - ..:/workspace:cached
+      - neural-optix-build-cache:/workspace/build
+      - ../output:/workspace/output
+
+    # Working directory
+    working_dir: /workspace
+
+    # Keep container running
+    command: sleep infinity
+
+    # User
+    user: developer
+
+volumes:
+  neural-optix-build-cache:

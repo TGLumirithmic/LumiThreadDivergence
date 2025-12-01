@@ -1,0 +1,69 @@
+{
+  "name": "Neural OptiX Renderer",
+
+  "dockerComposeFile": "docker-compose.yml",
+  "service": "neural-optix-dev",
+  "workspaceFolder": "/workspace",
+
+  // Set environment variables (docker-compose handles GPU and mounts)
+  "containerEnv": {
+    "OptiX_INSTALL_DIR": "/opt/optix",
+    "TCNN_DIR": "/opt/tiny-cuda-nn"
+  },
+
+  // Features to install (optional)
+  "features": {
+    "ghcr.io/devcontainers/features/git:1": {},
+    "ghcr.io/devcontainers/features/github-cli:1": {}
+  },
+
+  // VSCode settings
+  "customizations": {
+    "vscode": {
+      // Extensions to install
+      "extensions": [
+        "ms-vscode.cpptools",
+        "ms-vscode.cmake-tools",
+        "nvidia.nsight-vscode-edition",
+        "ms-python.python",
+        "ms-python.vscode-pylance",
+        "twxs.cmake",
+        "jeff-hykin.better-cpp-syntax",
+        "ms-vscode.makefile-tools"
+      ],
+
+      // Settings
+      "settings": {
+        "cmake.buildDirectory": "${workspaceFolder}/build",
+        "cmake.configureOnOpen": true,
+        "cmake.generator": "Ninja",
+        "C_Cpp.default.configurationProvider": "ms-vscode.cmake-tools",
+        "C_Cpp.default.cppStandard": "c++17",
+        "C_Cpp.default.includePath": [
+          "${workspaceFolder}/src",
+          "${workspaceFolder}/include",
+          "/opt/optix/include",
+          "/opt/tiny-cuda-nn/include",
+          "/usr/local/cuda/include"
+        ],
+        "files.associations": {
+          "*.cu": "cuda-cpp",
+          "*.cuh": "cuda-cpp"
+        },
+        "python.defaultInterpreterPath": "/usr/bin/python3",
+        "python.linting.enabled": true,
+        "python.linting.pylintEnabled": true,
+        "terminal.integrated.defaultProfile.linux": "bash"
+      }
+    }
+  },
+
+  // Post-create command (runs after container is created)
+  "postCreateCommand": "bash .devcontainer/post-create.sh",
+
+  // Post-start command (runs every time container starts)
+  "postStartCommand": "echo 'Neural OptiX Renderer Dev Container Ready!'",
+
+  // User to run as in the container
+  "remoteUser": "developer"
+}
