@@ -31,6 +31,18 @@ set(TCNN_HALF_PRECISION 1)
 find_package(CUDAToolkit REQUIRED)
 
 # ============================================================
+# OptiX SDK integration
+# ============================================================
+set(OptiX_INSTALL_DIR /opt/optix)
+set(OptiX_INCLUDE ${OptiX_INSTALL_DIR}/include)
+
+if(NOT EXISTS "${OptiX_INCLUDE}/optix.h")
+    message(FATAL_ERROR "OptiX SDK not found at: ${OptiX_INSTALL_DIR}")
+endif()
+
+message(STATUS "OptiX SDK found at ${OptiX_INSTALL_DIR}")
+
+# ============================================================
 # tiny-cuda-nn fixed location at /opt/tiny-cuda-nn
 # ============================================================
 set(TCNN_PREFIX /opt/tiny-cuda-nn/)
@@ -99,6 +111,8 @@ set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 include_directories(
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/programs
+    ${OptiX_INCLUDE}
     ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}
 )
 
@@ -106,4 +120,6 @@ include_directories(
 # Subdirectories
 # ============================================================
 add_subdirectory(src/neural)
+add_subdirectory(src/optix)
+add_subdirectory(programs)
 add_subdirectory(tests)

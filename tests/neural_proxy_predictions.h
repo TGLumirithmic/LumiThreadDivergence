@@ -17,28 +17,31 @@ namespace neural_proxy {
 
 // Magic number for file validation ("NRTP" = Neural Ray Tracing Predictions)
 constexpr uint32_t MAGIC_NUMBER = 0x4E525450;
-constexpr uint32_t FORMAT_VERSION = 1;
+constexpr uint32_t FORMAT_VERSION = 2;  // Version 2: Added hash_grid and direction_encodings support
 constexpr size_t MESH_NAME_SIZE = 256;
 
 /**
- * File header structure
+ * File header structure (288 bytes total)
  *
  * NOTE: Includes explicit padding for alignment.
- * After kd_uses_dfl, there are 3 padding bytes to align
+ * After has_direction_encodings, there is 1 padding byte to align
  * dfl_num_edges to a 4-byte boundary.
  */
 struct Header {
-    uint32_t magic;              // Magic number (0x4E525450)
-    uint32_t version;            // Format version (1)
-    uint32_t num_samples;        // Number of samples in file
-    uint8_t has_visibility;      // 1 if visibility predictions present
-    uint8_t has_depth;           // 1 if depth predictions present
-    uint8_t has_normal;          // 1 if normal predictions present
-    uint8_t has_kd;              // 1 if kd predictions present
-    uint8_t kd_uses_dfl;         // 1 if kd uses distributed focal loss
-    uint8_t padding[3];          // Padding for alignment
-    uint32_t dfl_num_edges;      // Number of DFL bin edges (0 if not using DFL)
-    char mesh_name[MESH_NAME_SIZE];  // Mesh name (null-terminated)
+    uint32_t magic;                      // Magic number (0x4E525450)
+    uint32_t version;                    // Format version (2)
+    uint32_t num_samples;                // Number of samples in file
+    uint8_t has_visibility;              // 1 if visibility predictions present
+    uint8_t has_depth;                   // 1 if depth predictions present
+    uint8_t has_normal;                  // 1 if normal predictions present
+    uint8_t has_kd;                      // 1 if kd predictions present
+    uint8_t kd_uses_dfl;                 // 1 if kd uses distributed focal loss
+    uint8_t has_hash_grid;               // 1 if hash grid intermediate features stored
+    uint8_t has_direction_encodings;     // 1 if intermediate direction encodings stored
+    uint8_t padding;                     // Padding for alignment (1 byte)
+    uint32_t dfl_num_edges;              // Number of DFL bin edges (0 if not using DFL)
+    uint32_t hash_grid_dim;              // Hash grid feature dimension (0 if not using hash grid)
+    char mesh_name[MESH_NAME_SIZE];      // Mesh name (null-terminated)
 };
 
 /**
@@ -65,6 +68,8 @@ struct Sample {
     float normal[3];                     // Predicted normal (if has_normal)
     std::vector<float> kd;               // Predicted kd RGB (if has_kd && !kd_uses_dfl)
     std::vector<float> kd_logits;        // Kd logits for DFL (if has_kd && kd_uses_dfl)
+    std::vector<float> hash_grid;        // hash grid features if has_hash_grid
+    std::vector<float> direction_encodings;        // direction encodings if has_direction_encodings
 };
 
 /**
@@ -146,6 +151,16 @@ public:
             }
         }
 
+        if (header_.has_hash_grid) {
+            sample.hash_grid.resize(header_.hash_grid_dim);
+            file_.read(reinterpret_cast<char*>(sample.hash_grid.data()), sizeof(float) * header_.hash_grid_dim);
+        }
+
+        if (header_.has_direction_encodings) {
+            sample.direction_encodings.resize(16);
+            file_.read(reinterpret_cast<char*>(sample.direction_encodings.data()), sizeof(float) * 16);
+        }
+
         samples_read_++;
         return file_.good();
     }
@@ -176,8 +191,11 @@ private:
         file_.read(reinterpret_cast<char*>(&header_.has_normal), sizeof(uint8_t));
         file_.read(reinterpret_cast<char*>(&header_.has_kd), sizeof(uint8_t));
         file_.read(reinterpret_cast<char*>(&header_.kd_uses_dfl), sizeof(uint8_t));
-        file_.read(reinterpret_cast<char*>(header_.padding), 3);  // Read 3 padding bytes
+        file_.read(reinterpret_cast<char*>(&header_.has_hash_grid), sizeof(uint8_t));
+        file_.read(reinterpret_cast<char*>(&header_.has_direction_encodings), sizeof(uint8_t));
+        file_.read(reinterpret_cast<char*>(header_.padding), 1);  // Read 3 padding bytes
         file_.read(reinterpret_cast<char*>(&header_.dfl_num_edges), sizeof(uint32_t));
+        file_.read(reinterpret_cast<char*>(&header_.hash_grid_dim), sizeof(uint32_t));
         file_.read(reinterpret_cast<char*>(header_.mesh_name), MESH_NAME_SIZE);
 
         // Validate magic number

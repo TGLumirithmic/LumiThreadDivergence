@@ -86,6 +86,18 @@ void test_with_predictions(neural::NeuralNetwork& network,
         std::cout << "Has visibility: " << (header.has_visibility ? "yes" : "no") << std::endl;
         std::cout << "Has depth: " << (header.has_depth ? "yes" : "no") << std::endl;
         std::cout << "Has normal: " << (header.has_normal ? "yes" : "no") << std::endl;
+        std::cout << "Has kd: " << (header.has_kd ? "yes" : "no") << std::endl;
+        if (header.has_kd) {
+            std::cout << "  Kd uses DFL: " << (header.kd_uses_dfl ? "yes" : "no") << std::endl;
+            if (header.kd_uses_dfl) {
+                std::cout << "  DFL num edges: " << header.dfl_num_edges << std::endl;
+            }
+        }
+        std::cout << "Has hash grid: " << (header.has_hash_grid ? "yes" : "no") << std::endl;
+        if (header.has_hash_grid) {
+            std::cout << "  Hash grid dim: " << header.hash_grid_dim << std::endl;
+        }
+        std::cout << "Has direction encodings: " << (header.has_direction_encodings ? "yes" : "no") << std::endl;
 
         // Read all samples
         auto samples = reader.read_all();
