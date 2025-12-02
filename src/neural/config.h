@@ -13,7 +13,7 @@ struct NetworkConfig {
     uint32_t n_features_per_level = 2;   // Features per level
     uint32_t log2_hashmap_size = 14;     // Hash table size (2^14)
     float base_resolution = 16.0f;       // Base/coarsest resolution
-    float max_resolution = 2048.0f;      // Maximum/finest resolution
+    float max_resolution = 1024.0f;      // Maximum/finest resolution
 
     // Compute per-level scale from base and max resolution
     float compute_per_level_scale() const {

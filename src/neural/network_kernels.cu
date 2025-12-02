@@ -117,6 +117,6 @@ __global__ void convert_and_pad_direction_kernel(
 
     // Pad remaining dimensions with zeros
     for (uint32_t i = input_dims; i < padded_dims; ++i) {
-        output[output_offset + i] = __float2half(0.0f);
+        output[output_offset + i] = __float2half(1.0f);
     }
 }

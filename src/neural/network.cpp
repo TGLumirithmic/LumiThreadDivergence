@@ -185,33 +185,12 @@ bool NeuralNetwork::initialize_from_weights(const WeightLoader& loader) {
 
         bool weights_loaded = true;
 
-        // Cast encoding pointer for checkpoints
-        auto* encoding = reinterpret_cast<Encoding<precision_t>*>(encoding_);
-
         // Load position encoder weights
         weights_loaded &= load_position_encoder_weights(loader);
-
-        // CHECKPOINT: After position encoder load
-        std::cout << "\n[CHECKPOINT] After position encoder load:" << std::endl;
-        std::cout << "  params() pointer: " << (void*)encoding->params() << std::endl;
-        std::cout << "  inference_params() pointer: " << (void*)encoding->inference_params() << std::endl;
-#if TCNN_HALF_PRECISION
-        debug_utils::print_device_values_half(encoding->params(), 5, "Pos encoder params() after load", 5);
-#else
-        debug_utils::print_device_values(encoding->params(), 5, "Pos encoder params() after load", 5);
-#endif
 
         // Load direction encoder weights if enabled
         if (config_.use_direction_encoder) {
             weights_loaded &= load_direction_encoder_weights(loader);
-
-            // CHECKPOINT: After direction encoder load
-            std::cout << "\n[CHECKPOINT] After direction encoder load:" << std::endl;
-#if TCNN_HALF_PRECISION
-            debug_utils::print_device_values_half(encoding->params(), 5, "Pos encoder after dir encoder load", 5);
-#else
-            debug_utils::print_device_values(encoding->params(), 5, "Pos encoder after dir encoder load", 5);
-#endif
         }
 
         weights_loaded &= load_network_weights(
@@ -220,14 +199,6 @@ bool NeuralNetwork::initialize_from_weights(const WeightLoader& loader) {
             "visibility_decoder",
             config_.visibility_decoder
         );
-
-        // CHECKPOINT: After visibility decoder load
-        std::cout << "\n[CHECKPOINT] After visibility decoder load:" << std::endl;
-#if TCNN_HALF_PRECISION
-        debug_utils::print_device_values_half(encoding->params(), 5, "Pos encoder after vis decoder load", 5);
-#else
-        debug_utils::print_device_values(encoding->params(), 5, "Pos encoder after vis decoder load", 5);
-#endif
 
         weights_loaded &= load_network_weights(
             normal_network_,
@@ -359,55 +330,10 @@ void NeuralNetwork::inference(
         throw std::runtime_error("Batch size must be a multiple of " + std::to_string(BATCH_SIZE_GRANULARITY));
     }
 
-    if (!stream) CUDA_CHECK(cudaDeviceSynchronize());
-    cudaError_t err = cudaGetLastError();
-    if (err != cudaSuccess) {
-        std::cerr << "[CUDA ERROR] At entry " << cudaGetErrorString(err) << std::endl;
-        throw std::runtime_error("Failed at inference start");
-    }
-
-    std::cout << "\n========================================" << std::endl;
-    std::cout << "[INFO] Starting inference, batch_size=" << batch_size << std::endl;
-    std::cout << "========================================\n" << std::endl;
-
-    auto* encoding = reinterpret_cast<Encoding<precision_t>*>(encoding_);
-
-    // CHECKPOINT: Check weights at START of inference (before any operations)
-    std::cout << "\n[CHECKPOINT] Encoding weights at START of inference:" << std::endl;
-    std::cout << "  params() pointer: " << (void*)encoding->params() << std::endl;
-    std::cout << "  inference_params() pointer: " << (void*)encoding->inference_params() << std::endl;
-#if TCNN_HALF_PRECISION
-    debug_utils::print_device_values_half(encoding->params(), 10, "Pos encoder params() at inference START", 10);
-#else
-    debug_utils::print_device_values(encoding->params(), 10, "Pos encoder params() at inference START", 10);
-#endif
-
     // Allocate encoding buffers if needed
     allocate_buffers(batch_size);
 
-    // CHECKPOINT: Check weights AFTER buffer allocation
-    std::cout << "\n[CHECKPOINT] Encoding weights AFTER allocate_buffers:" << std::endl;
-#if TCNN_HALF_PRECISION
-    debug_utils::print_device_values_half(encoding->params(), 10, "Pos encoder params() after allocation", 10);
-#else
-    debug_utils::print_device_values(encoding->params(), 10, "Pos encoder params() after allocation", 10);
-#endif
-
-    // STEP 0: Check input positions and directions
-    std::cout << "\n>>> STEP 0: Checking input data <<<" << std::endl;
-    debug_utils::print_buffer_stats(d_positions, batch_size * 3, "Input positions");
-    debug_utils::check_for_nan_inf(d_positions, batch_size * 3, "Input positions");
-    debug_utils::print_buffer_stats(d_directions, batch_size * 3, "Input directions");
-    debug_utils::check_for_nan_inf(d_directions, batch_size * 3, "Input directions");
- 
-    std::cout << "[DEBUG] Allocated buffers: "
-              << "d_encoded_=" << encoded_buffer_size_
-              << ", d_dir_input_float_=" << dir_input_float_buffer_size_
-              << ", d_dir_encoded_=" << dir_encoded_buffer_size_
-              << ", d_concatenated_float_=" << concatenated_float_buffer_size_
-              << std::endl;
-
-    // encoding pointer already declared earlier for checkpoints
+    auto* encoding = reinterpret_cast<Encoding<precision_t>*>(encoding_);
     auto* vis_network = reinterpret_cast<Network<precision_t>*>(visibility_network_);
     auto* norm_network = reinterpret_cast<Network<precision_t>*>(normal_network_);
     auto* depth_network = reinterpret_cast<Network<precision_t>*>(depth_network_);
@@ -417,85 +343,13 @@ void NeuralNetwork::inference(
     uint32_t pos_encoding_dims = config_.encoding_n_output_dims();
     uint32_t decoder_input_dims = config_.decoder_input_dims();
 
-    // STEP 0b: Check encoding weights
-    std::cout << "\n>>> STEP 0b: Encoding weights info <<<" << std::endl;
-    std::cout << "  Position encoder has " << encoding->n_params() << " parameters" << std::endl;
-
-    // Check first few encoding weights (copy as raw bytes to inspect)
-    size_t n_params = encoding->n_params();
-    precision_t* params_ptr = encoding->params();
-    std::vector<float> first_weights(std::min<size_t>(100, n_params));
-
-    // Copy and convert to float
-    std::vector<precision_t> temp_weights(std::min<size_t>(100, n_params));
-    CUDA_CHECK(cudaMemcpy(temp_weights.data(), params_ptr, temp_weights.size() * sizeof(precision_t), cudaMemcpyDeviceToHost));
-    for (size_t i = 0; i < temp_weights.size(); i++) {
-        first_weights[i] = (float)temp_weights[i];
-    }
-
-    // Check for NaN/Inf in weights
-    int weight_nan_count = 0;
-    int weight_inf_count = 0;
-    int weight_zero_count = 0;
-    for (float w : first_weights) {
-        if (std::isnan(w)) weight_nan_count++;
-        if (std::isinf(w)) weight_inf_count++;
-        if (w == 0.0f) weight_zero_count++;
-    }
-
-    std::cout << "  First 100 weights: NaN=" << weight_nan_count
-              << ", Inf=" << weight_inf_count
-              << ", Zero=" << weight_zero_count << std::endl;
-    std::cout << "  First 10 weight values: ";
-    for (int i = 0; i < std::min(10, (int)first_weights.size()); i++) {
-        std::cout << first_weights[i];
-        if (i < 9) std::cout << ", ";
-    }
-    std::cout << std::endl;
-    debug_utils::print_device_values_half(encoding->inference_params(), std::min<size_t>(10, n_params), "Pos encoder params loaded (half)", 10);
-
     // Step 1: Encode positions
-    std::cout << "[INFO] Step 1: Position encoding, n_input_dims=" << config_.n_input_dims
-            << ", pos_encoding_dims=" << pos_encoding_dims
-            << ", batch_size=" << batch_size << std::endl;
-
-    // Allocate temporary buffer for positions (same size)
-    float* d_positions_tmp = nullptr;
-    size_t positions_bytes = batch_size * config_.n_input_dims * sizeof(float);
-    CUDA_CHECK(cudaMalloc(&d_positions_tmp, positions_bytes));
-
-    // Try copying d_positions to d_positions_tmp (device-to-device)
-    std::cout << "[DEBUG] Copying d_positions to temporary buffer..." << std::endl;
-    CUDA_CHECK(cudaMemcpy(d_positions_tmp, d_positions, positions_bytes, cudaMemcpyDeviceToDevice));
-    CUDA_CHECK(cudaDeviceSynchronize());
-    std::cout << "[DEBUG] Copy succeeded" << std::endl;
-
-    // Device-side inspection of input positions
-    std::cout << "\n>>> STEP 0c: Device-side inspection of positions <<<" << std::endl;
-    debug_utils::print_device_values(d_positions, batch_size * 3, "Input positions (original)", 15);
-    debug_utils::print_device_values(d_positions_tmp, batch_size * 3, "Input positions (copy)", 15);
-
-    // Create GPUMatrixDynamic objects using the temporary buffer
-    GPUMatrixDynamic<float> pos_input(d_positions_tmp, config_.n_input_dims, batch_size);
+    GPUMatrixDynamic<float> pos_input(const_cast<float*>(d_positions), config_.n_input_dims, batch_size);
     GPUMatrixDynamic<float> pos_output(d_encoded_, pos_encoding_dims, batch_size);
-
-    // Run the encoder
-    std::cout << "[DEBUG] Running encoding->inference..." << std::endl;
     encoding->inference(stream, pos_input, pos_output, true);
-    CUDA_CHECK(cudaDeviceSynchronize());
-    std::cout << "[DEBUG] Encoding inference completed" << std::endl;
-
-    // Free temporary buffer
-    CUDA_CHECK(cudaFree(d_positions_tmp));
-
-    // Debug: Check encoded positions
-    std::cout << "\n>>> STEP 1 Result: Checking encoded positions <<<" << std::endl;
-    debug_utils::print_device_values(d_encoded_, batch_size * pos_encoding_dims, "Encoded positions (device)", 20);
-    debug_utils::print_buffer_stats(d_encoded_, batch_size * pos_encoding_dims, "Encoded positions");
-    debug_utils::check_for_nan_inf(d_encoded_, batch_size * pos_encoding_dims, "Encoded positions");
 
     if (!stream) CUDA_CHECK(cudaDeviceSynchronize());
-    err = cudaGetLastError();
+    cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
         std::cerr << "[CUDA ERROR] After position encoding: " << cudaGetErrorString(err) << std::endl;
         throw std::runtime_error("Position encoding failed");
@@ -507,14 +361,10 @@ void NeuralNetwork::inference(
         uint32_t dir_encoding_dims = config_.direction_encoder_n_output_dims();
         uint32_t padded_dir_input_dims = ((config_.direction_input_dims + 15) / 16) * 16;
 
-        std::cout << "[INFO] Step 2: Pad directions, padded_dir_input_dims=" << padded_dir_input_dims
-                  << ", batch_size=" << batch_size << std::endl;
-
         uint32_t threads = 256;
         uint32_t blocks = (batch_size + threads - 1) / threads;
 
 #if TCNN_HALF_PRECISION
-        // Use half precision kernel for sm_75+
         convert_and_pad_direction_kernel<<<blocks, threads, 0, stream>>>(
             d_directions,
             reinterpret_cast<__half*>(d_dir_input_float_),
@@ -523,7 +373,6 @@ void NeuralNetwork::inference(
             padded_dir_input_dims
         );
 #else
-        // Use float kernel for sm_52
         pad_direction_kernel_float<<<blocks, threads, 0, stream>>>(
             d_directions,
             d_dir_input_float_,
@@ -539,33 +388,11 @@ void NeuralNetwork::inference(
             throw std::runtime_error("Pad direction kernel failed");
         }
 
-        std::cout << "[INFO] Step 2b: Direction encoder inference" << std::endl;
-
-        // Debug: Check padded direction input before encoding
-        std::cout << "\n>>> STEP 2a Result: Checking padded directions <<<" << std::endl;
-        std::cout << "\n[DEBUG] Original directions (device-side, first sample):" << std::endl;
-        debug_utils::print_device_values(d_directions, 16, "Original directions", 16);
-        std::cout << "\n[DEBUG] After padding (device-side, first sample):" << std::endl;
-#if TCNN_HALF_PRECISION
-        // Buffer contains half precision data, use half-specific debug function
-        debug_utils::print_device_values_half(reinterpret_cast<__half*>(d_dir_input_float_), 16, "Padded directions (half)", 16);
-#else
-        debug_utils::print_device_values(d_dir_input_float_, 16, "Padded directions (float)", 16);
-#endif
-        // Note: Can't use print_buffer_stats on half buffer as it expects float
-        // debug_utils::print_buffer_stats(d_dir_input_float_, batch_size * padded_dir_input_dims, "Padded directions");
-        // debug_utils::check_for_nan_inf(d_dir_input_float_, batch_size * padded_dir_input_dims, "Padded directions");
-
         GPUMatrixDynamic<precision_t> dir_input(reinterpret_cast<precision_t*>(d_dir_input_float_), padded_dir_input_dims, batch_size);
         GPUMatrixDynamic<float> dir_output(d_dir_encoded_, dir_encoding_dims, batch_size);
         dir_encoder->inference(stream, dir_input, dir_output, true);
 
         if (!stream) CUDA_CHECK(cudaDeviceSynchronize());
-
-        // Debug: Check direction encoding output
-        std::cout << "\n>>> STEP 2b Result: Checking direction encoding <<<" << std::endl;
-        debug_utils::print_buffer_stats(d_dir_encoded_, batch_size * dir_encoding_dims, "Direction encoding");
-        debug_utils::check_for_nan_inf(d_dir_encoded_, batch_size * dir_encoding_dims, "Direction encoding");
         err = cudaGetLastError();
         if (err != cudaSuccess) {
             std::cerr << "[CUDA ERROR] After direction encoder inference: " << cudaGetErrorString(err) << std::endl;
@@ -573,11 +400,7 @@ void NeuralNetwork::inference(
         }
 
         // Step 3: Concatenate position + direction encodings
-        std::cout << "[INFO] Step 3: Concatenate encodings, pos=" << pos_encoding_dims
-                  << ", dir=" << dir_encoding_dims << std::endl;
-
 #if TCNN_HALF_PRECISION
-        // Use half precision kernel for sm_75+
         concatenate_encodings_to_half_kernel<<<blocks, threads, 0, stream>>>(
             d_encoded_,
             d_dir_encoded_,
@@ -587,7 +410,6 @@ void NeuralNetwork::inference(
             dir_encoding_dims
         );
 #else
-        // Use float kernel for sm_52
         concatenate_encodings_kernel_float<<<blocks, threads, 0, stream>>>(
             d_encoded_,
             d_dir_encoded_,
@@ -603,20 +425,9 @@ void NeuralNetwork::inference(
             std::cerr << "[CUDA ERROR] After concatenate_encodings_kernel: " << cudaGetErrorString(err) << std::endl;
             throw std::runtime_error("Concatenate encodings kernel failed");
         }
-
-        // Debug: Check concatenated features
-        std::cout << "\n>>> STEP 3 Result: Checking concatenated features <<<" << std::endl;
-#if TCNN_HALF_PRECISION
-        debug_utils::print_device_values_half(reinterpret_cast<__half*>(d_concatenated_float_), batch_size * decoder_input_dims, "Concatenated features (half)", 20);
-#else
-        debug_utils::print_buffer_stats(d_concatenated_float_, batch_size * decoder_input_dims, "Concatenated features");
-        debug_utils::check_for_nan_inf(d_concatenated_float_, batch_size * decoder_input_dims, "Concatenated features");
-#endif
     } else {
         // No direction encoder, just copy/convert position encoding
-        std::cout << "[INFO] Step 2: No direction encoder, copying position encoding" << std::endl;
 #if TCNN_HALF_PRECISION
-        // Convert float position encoding to half precision
         uint32_t threads = 256;
         uint32_t blocks = ((batch_size * pos_encoding_dims) + threads - 1) / threads;
         convert_float_to_half_kernel<<<blocks, threads, 0, stream>>>(
@@ -625,7 +436,6 @@ void NeuralNetwork::inference(
             batch_size * pos_encoding_dims
         );
 #else
-        // Just copy as float
         CUDA_CHECK(cudaMemcpyAsync(
             d_concatenated_float_,
             d_encoded_,
@@ -640,20 +450,9 @@ void NeuralNetwork::inference(
             std::cerr << "[CUDA ERROR] After memcpy/convert of position encoding: " << cudaGetErrorString(err) << std::endl;
             throw std::runtime_error("Memcpy/convert of position encoding failed");
         }
-
-        // Debug: Check copied/converted position encoding
-        std::cout << "\n>>> STEP 2 Result: Checking copied position encoding <<<" << std::endl;
-#if TCNN_HALF_PRECISION
-        debug_utils::print_device_values_half(reinterpret_cast<__half*>(d_concatenated_float_), batch_size * pos_encoding_dims, "Copied position encoding (half)", 20);
-#else
-        debug_utils::print_buffer_stats(d_concatenated_float_, batch_size * pos_encoding_dims, "Copied position encoding");
-        debug_utils::check_for_nan_inf(d_concatenated_float_, batch_size * pos_encoding_dims, "Copied position encoding");
-#endif
     }
 
     // Step 4: Run decoders
-    std::cout << "[INFO] Step 4: Decoder inference" << std::endl;
-
     GPUMatrixDynamic<precision_t> decoder_in(reinterpret_cast<precision_t*>(d_concatenated_float_), decoder_input_dims, batch_size);
     GPUMatrixDynamic<float> vis_output(d_visibility, config_.visibility_decoder.n_output_dims, batch_size);
     GPUMatrixDynamic<float> norm_output(d_normals, config_.normal_decoder.n_output_dims, batch_size);
@@ -667,11 +466,6 @@ void NeuralNetwork::inference(
         throw std::runtime_error("Visibility decoder failed");
     }
 
-    // Debug: Check visibility output
-    std::cout << "\n>>> STEP 4a Result: Checking visibility output <<<" << std::endl;
-    debug_utils::print_buffer_stats(d_visibility, batch_size, "Visibility output");
-    debug_utils::check_for_nan_inf(d_visibility, batch_size, "Visibility output");
-
     norm_network->inference(stream, decoder_in, norm_output, true);
     if (!stream) CUDA_CHECK(cudaDeviceSynchronize());
     err = cudaGetLastError();
@@ -680,11 +474,6 @@ void NeuralNetwork::inference(
         throw std::runtime_error("Normal decoder failed");
     }
 
-    // Debug: Check normal output
-    std::cout << "\n>>> STEP 4b Result: Checking normal output <<<" << std::endl;
-    debug_utils::print_buffer_stats(d_normals, batch_size * 3, "Normal output");
-    debug_utils::check_for_nan_inf(d_normals, batch_size * 3, "Normal output");
-
     depth_network->inference(stream, decoder_in, depth_output, true);
     if (!stream) CUDA_CHECK(cudaDeviceSynchronize());
     err = cudaGetLastError();
@@ -692,15 +481,6 @@ void NeuralNetwork::inference(
         std::cerr << "[CUDA ERROR] After depth decoder: " << cudaGetErrorString(err) << std::endl;
         throw std::runtime_error("Depth decoder failed");
     }
-
-    // Debug: Check depth output
-    std::cout << "\n>>> STEP 4c Result: Checking depth output <<<" << std::endl;
-    debug_utils::print_buffer_stats(d_depth, batch_size, "Depth output");
-    debug_utils::check_for_nan_inf(d_depth, batch_size, "Depth output");
-
-    std::cout << "\n========================================" << std::endl;
-    std::cout << "[INFO] Inference complete for batch_size=" << batch_size << std::endl;
-    std::cout << "========================================\n" << std::endl;
 }
 
 
@@ -810,18 +590,9 @@ bool NeuralNetwork::load_position_encoder_weights(const WeightLoader& loader) {
 
         // Convert to half precision
         std::vector<precision_t> params_fp16(n_params);
-
-        std::cout << "First 100 elements FP16 - [" << std::endl;
         for (size_t i = 0; i < n_params; ++i) {
             params_fp16[i] = (precision_t)params_fp32[i];
-            if (i < 100) {
-                std::cout << (float)params_fp16[i];
-                if (i < 99) std::cout << ", ";
-            }
         }
-        std::cout << "]" << std::endl;
-
-        std::cout << "    Copying " << n_params << " parameters to device..." << std::endl;
 
         // CRITICAL: Allocate PERSISTENT GPU memory for parameters
         // The encoding stores pointers, so memory must persist for the lifetime of the encoding
@@ -831,30 +602,11 @@ bool NeuralNetwork::load_position_encoder_weights(const WeightLoader& loader) {
         // Store the persistent GPU memory pointer
         position_encoder_params_ = gpu_params;
 
-#if TCNN_HALF_PRECISION
-        debug_utils::print_device_values_half(gpu_params->data(), std::min<size_t>(100, n_params), "Pos encoder params (half)", 100);
-#else
-        debug_utils::print_device_values(gpu_params->data(), std::min<size_t>(100, n_params), "Pos encoder params (float)", 100);
-#endif
         // Set both training and inference params to the same values
         // Pass pointers to PERSISTENT memory (gpu_params will live until destructor)
         encoding->set_params(gpu_params->data(), gpu_params->data(), gpu_params->data());
 
-        #if TCNN_HALF_PRECISION
-                debug_utils::print_device_values_half(encoding->inference_params(), std::min<size_t>(100, n_params), "Pos encoder params loaded (half)", 100);
-        #else
-                debug_utils::print_device_values(encoding->inference_params(), std::min<size_t>(100, n_params), "Pos encoder params (float)", 100);
-        #endif
         std::cout << "    Successfully loaded " << params_to_load << " parameters" << std::endl;
-
-        // CHECKPOINT: Verify weights immediately after loading
-        std::cout << "\n[CHECKPOINT] Verifying weights immediately after load:" << std::endl;
-#if TCNN_HALF_PRECISION
-        debug_utils::print_device_values_half(encoding->inference_params(), 10, "Pos encoder params AFTER set_params", 10);
-#else
-        debug_utils::print_device_values(encoding->inference_params(), 10, "Pos encoder params AFTER set_params", 10);
-#endif
-
         return true;
 
     } catch (const std::exception& e) {

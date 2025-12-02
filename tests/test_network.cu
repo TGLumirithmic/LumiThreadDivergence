@@ -103,7 +103,15 @@ void test_with_predictions(neural::NeuralNetwork& network,
         float* d_visibility = cuda_utils::allocate_device<float>(batch_size);
         float* d_normals = cuda_utils::allocate_device<float>(batch_size * 3);
         float* d_depth = cuda_utils::allocate_device<float>(batch_size);
-        
+
+        // Metrics accumulators
+        int total_visibility_samples = 0;
+        int correct_visibility_predictions = 0;
+        double total_depth_l1_loss = 0.0;
+        int total_depth_samples = 0;
+        double total_cosine_similarity = 0.0;
+        int total_normal_samples = 0;
+
         int total_samples = samples.size();
         for (int start = 0; start < total_samples; start += batch_size) {
             int current_batch = std::min(batch_size, total_samples - start);
@@ -121,48 +129,82 @@ void test_with_predictions(neural::NeuralNetwork& network,
             }
 
             // Copy to device
-            cuda_utils::copy_to_device(d_positions, h_positions.data(), current_batch * 3);
-            cuda_utils::copy_to_device(d_directions, h_directions.data(), current_batch * 3);
+            cuda_utils::copy_to_device(d_positions, h_positions.data(), batch_size * 3);
+            cuda_utils::copy_to_device(d_directions, h_directions.data(), batch_size * 3);
 
             // Run batched inference
-            network.inference(d_positions, d_directions, d_visibility, d_normals, d_depth, current_batch);
+            network.inference(d_positions, d_directions, d_visibility, d_normals, d_depth, batch_size);
             CUDA_SYNC_CHECK();
 
             // Copy results back
-            cuda_utils::copy_to_host(h_visibility.data(), d_visibility, current_batch);
-            cuda_utils::copy_to_host(h_normals.data(), d_normals, current_batch * 3);
-            cuda_utils::copy_to_host(h_depth.data(), d_depth, current_batch);
+            cuda_utils::copy_to_host(h_visibility.data(), d_visibility, batch_size);
+            cuda_utils::copy_to_host(h_normals.data(), d_normals, batch_size * 3);
+            cuda_utils::copy_to_host(h_depth.data(), d_depth, batch_size);
 
-            // Print results for first few samples in the batch
-            int print_count = std::min(10, current_batch);
-            for (int i = 0; i < print_count; ++i) {
+            // Aggregate metrics for this batch
+            for (int i = 0; i < current_batch; ++i) {
                 const auto& sample = samples[start + i];
-                std::cout << "\nSample " << (start + i) << ":" << std::endl;
-                std::cout << "  Position: [" << h_positions[i * 3] << ", "
-                          << h_positions[i * 3 + 1] << ", "
-                          << h_positions[i * 3 + 2] << "]" << std::endl;
 
+                // Visibility accuracy (thresholded at 0.5)
                 if (header.has_visibility) {
                     float gt_vis = 1.0f / (1.0f + std::exp(-sample.visibility_logit));
-                    std::cout << "  Visibility - Predicted: " << h_visibility[i]
-                              << ", GT: " << gt_vis
-                              << ", Diff: " << std::abs(h_visibility[i] - gt_vis) << std::endl;
+                    bool pred_visible = h_visibility[i] >= 0.5f;
+                    bool gt_visible = gt_vis >= 0.5f;
+                    if (pred_visible == gt_visible) {
+                        correct_visibility_predictions++;
+                    }
+                    total_visibility_samples++;
                 }
 
+                // Depth L1 loss
                 if (header.has_depth) {
-                    std::cout << "  Depth - Predicted: " << h_depth[i]
-                              << ", GT: " << sample.depth
-                              << ", Diff: " << std::abs(h_depth[i] - sample.depth) << std::endl;
+                    total_depth_l1_loss += std::abs(h_depth[i] - sample.depth);
+                    total_depth_samples++;
                 }
 
+                // Normal cosine similarity (with normalization)
                 if (header.has_normal) {
-                    std::cout << "  Normal - Predicted: [" << h_normals[i * 3] << ", "
-                              << h_normals[i * 3 + 1] << ", " << h_normals[i * 3 + 2] << "]" << std::endl;
-                    std::cout << "         - GT: [" << sample.normal[0] << ", "
-                              << sample.normal[1] << ", " << sample.normal[2] << "]" << std::endl;
+                    // Normalize predicted normal
+                    float pred_norm = std::sqrt(h_normals[i * 3 + 0] * h_normals[i * 3 + 0] +
+                                               h_normals[i * 3 + 1] * h_normals[i * 3 + 1] +
+                                               h_normals[i * 3 + 2] * h_normals[i * 3 + 2]);
+                    float pred_nx = h_normals[i * 3 + 0] / (pred_norm + 1e-8f);
+                    float pred_ny = h_normals[i * 3 + 1] / (pred_norm + 1e-8f);
+                    float pred_nz = h_normals[i * 3 + 2] / (pred_norm + 1e-8f);
+
+                    // Normalize GT normal
+                    float gt_norm = std::sqrt(sample.normal[0] * sample.normal[0] +
+                                             sample.normal[1] * sample.normal[1] +
+                                             sample.normal[2] * sample.normal[2]);
+                    float gt_nx = sample.normal[0] / (gt_norm + 1e-8f);
+                    float gt_ny = sample.normal[1] / (gt_norm + 1e-8f);
+                    float gt_nz = sample.normal[2] / (gt_norm + 1e-8f);
+
+                    // Compute cosine similarity (dot product of normalized vectors)
+                    float cosine_sim = pred_nx * gt_nx + pred_ny * gt_ny + pred_nz * gt_nz;
+                    total_cosine_similarity += cosine_sim;
+                    total_normal_samples++;
                 }
             }
-            break;
+        }
+
+        // Print aggregated metrics
+        std::cout << "\n=== Aggregated Metrics ===" << std::endl;
+
+        if (total_visibility_samples > 0) {
+            float accuracy = (float)correct_visibility_predictions / total_visibility_samples;
+            std::cout << "Visibility Accuracy: " << accuracy
+                      << " (" << correct_visibility_predictions << "/" << total_visibility_samples << ")" << std::endl;
+        }
+
+        if (total_depth_samples > 0) {
+            double mean_l1_loss = total_depth_l1_loss / total_depth_samples;
+            std::cout << "Depth L1 Loss: " << mean_l1_loss << std::endl;
+        }
+
+        if (total_normal_samples > 0) {
+            double mean_cosine_similarity = total_cosine_similarity / total_normal_samples;
+            std::cout << "Normal Cosine Similarity: " << mean_cosine_similarity << std::endl;
         }
 
         // Cleanup device memory
@@ -226,10 +268,37 @@ void test_simple_grid(neural::NeuralNetwork& network,
     cuda_utils::copy_to_host(normals.data(), d_normals, width * height * 3);
     cuda_utils::copy_to_host(depth.data(), d_depth, width * height);
 
+    std::vector<float> visibility_threshold;
+    for (auto it = visibility.begin(); it != visibility.end(); it++)
+    {
+        visibility_threshold.push_back((*it >= 0.5) ? 1.0 : 0.0);
+    }
+
+    // Normalize, scale and shift normals to [0, 1]^3 for visualization
+    std::vector<float> normals_vis(width * height * 3);
+    for (int i = 0; i < width * height; ++i) {
+        // Normalize the normal vector
+        float nx = normals[i * 3 + 0];
+        float ny = normals[i * 3 + 1];
+        float nz = normals[i * 3 + 2];
+        float norm = std::sqrt(nx * nx + ny * ny + nz * nz);
+
+        if (norm > 1e-8f) {
+            nx /= norm;
+            ny /= norm;
+            nz /= norm;
+        }
+
+        // Scale from [-1, 1] to [0, 1]
+        normals_vis[i * 3 + 0] = (nx + 1.0f) * 0.5f;
+        normals_vis[i * 3 + 1] = (ny + 1.0f) * 0.5f;
+        normals_vis[i * 3 + 2] = (nz + 1.0f) * 0.5f;
+    }
+
     // Write visualization images
     std::cout << "Writing visualization images..." << std::endl;
-    write_ppm(output_dir + "/visibility.ppm", visibility.data(), width, height, 1);
-    write_ppm(output_dir + "/normals.ppm", normals.data(), width, height, 3);
+    write_ppm(output_dir + "/visibility.ppm", visibility_threshold.data(), width, height, 1);
+    write_ppm(output_dir + "/normals.ppm", normals_vis.data(), width, height, 3);
     write_ppm(output_dir + "/depth.ppm", depth.data(), width, height, 1);
 
     // Cleanup
