@@ -1,8 +1,13 @@
 # Neural OptiX Renderer Development Container
 # Multi-stage build for optimal image size
 
+# Base image configuration
+# For GTX 980 / lower resource: nvidia/cuda:11.6.1-devel-ubuntu20.04
+# For RTX 3090/4090 / high resource: nvidia/cuda:12.3.2-devel-ubuntu22.04 or nvidia/cuda:12.6.3-devel-ubuntu24.04
+ARG CUDA_BASE_IMAGE=nvidia/cuda:11.6.1-devel-ubuntu20.04
+
 # Stage 1: Build OptiX SDK and dependencies
-FROM nvidia/cuda:11.6.1-devel-ubuntu20.04 as builder
+FROM ${CUDA_BASE_IMAGE} as builder
 
 ARG OPTIX_VERSION=9.0.0
 ARG DEBIAN_FRONTEND=noninteractive
@@ -32,7 +37,9 @@ RUN apt-get update && apt-get install -y \
 RUN wget -O - https://apt.kitware.com/keys/kitware-archive-latest.asc 2>/dev/null | gpg --dearmor - | tee /usr/share/keyrings/kitware-archive-keyring.gpg >/dev/null
 
 # Add Kitware repo manually (without add-apt-repository)
-RUN echo "deb [signed-by=/usr/share/keyrings/kitware-archive-keyring.gpg] https://apt.kitware.com/ubuntu/ focal main" \
+# Automatically detects Ubuntu version (focal/jammy/noble)
+RUN UBUNTU_CODENAME=$(lsb_release -cs) && \
+    echo "deb [signed-by=/usr/share/keyrings/kitware-archive-keyring.gpg] https://apt.kitware.com/ubuntu/ ${UBUNTU_CODENAME} main" \
         > /etc/apt/sources.list.d/kitware.list
 
 # Install latest CMake
@@ -52,18 +59,28 @@ RUN chmod +x /tmp/optix-installer/NVIDIA-OptiX-SDK-${OPTIX_VERSION}-linux64-x86_
         --prefix=/opt/optix && \
     rm -rf /tmp/optix-installer
 
+# Note: The Kitware CMake repository URL is automatically configured for the Ubuntu version
+
 # # Build OptiX SDK samples (optional)
 # RUN cd /opt/optix && \
 #     mkdir -p build && cd build && \
 #     cmake ../SDK && make -j$(nproc) install
 
 # Stage 2: Development environment
-FROM nvidia/cuda:11.6.1-devel-ubuntu20.04
+FROM ${CUDA_BASE_IMAGE}
 
+ARG CUDA_BASE_IMAGE=nvidia/cuda:11.6.1-devel-ubuntu20.04
 ARG DEBIAN_FRONTEND=noninteractive
 ARG USERNAME=developer
 ARG USER_UID=1000
 ARG USER_GID=$USER_UID
+
+# GPU configuration arguments
+# For GTX 980: CUDA_ARCH=52, ENABLE_HALF_PRECISION=OFF
+# For RTX 3090/4090: CUDA_ARCH=86, ENABLE_HALF_PRECISION=ON
+# For RTX 2080 Ti: CUDA_ARCH=75, ENABLE_HALF_PRECISION=ON
+ARG CUDA_ARCH=52
+ARG ENABLE_HALF_PRECISION=OFF
 
 # Install runtime and development dependencies
 RUN apt-get update && apt-get install -y \
@@ -100,14 +117,16 @@ RUN apt-get update && apt-get install -y \
 RUN wget -O - https://apt.kitware.com/keys/kitware-archive-latest.asc 2>/dev/null | gpg --dearmor - | tee /usr/share/keyrings/kitware-archive-keyring.gpg >/dev/null
 
 # Add Kitware repo manually (without add-apt-repository)
-RUN echo "deb [signed-by=/usr/share/keyrings/kitware-archive-keyring.gpg] https://apt.kitware.com/ubuntu/ focal main" \
+# Automatically detects Ubuntu version (focal/jammy/noble)
+RUN UBUNTU_CODENAME=$(lsb_release -cs) && \
+    echo "deb [signed-by=/usr/share/keyrings/kitware-archive-keyring.gpg] https://apt.kitware.com/ubuntu/ ${UBUNTU_CODENAME} main" \
         > /etc/apt/sources.list.d/kitware.list
 
 # Install latest CMake
 RUN apt-get update && apt-get install -y cmake
 
 
-# Clone and build tiny-cuda-nn for GTX 980 (sm_52)
+# Clone and build tiny-cuda-nn with configurable GPU support
 # Note: GTX 980 (sm_52) doesn't support half precision in tiny-cuda-nn
 # Must build with TCNN_HALF_PRECISION=OFF to use float precision
 # Note we don't do a system install as historically this has caused stale versions
@@ -120,10 +139,10 @@ RUN git clone --recursive https://github.com/NVlabs/tiny-cuda-nn.git /opt/tiny-c
         -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc \
         -DTCNN_BUILD_BENCHMARK=OFF \
         -DTCNN_BUILD_EXAMPLES=OFF \
-        -DCMAKE_CUDA_ARCHITECTURES=52 \
-        -DTCNN_MIN_GPU_ARCH=52 \
-        -DTCNN_ENABLE_HALF_PRECISION=OFF \
-        -DTCNN_DISABLE_TENSOR_CORES=ON && \
+        -DCMAKE_CUDA_ARCHITECTURES=${CUDA_ARCH} \
+        -DTCNN_MIN_GPU_ARCH=${CUDA_ARCH} \
+        -DTCNN_ENABLE_HALF_PRECISION=${ENABLE_HALF_PRECISION} \
+        -DTCNN_DISABLE_TENSOR_CORES=$(if [ "${CUDA_ARCH}" = "52" ]; then echo "ON"; else echo "OFF"; fi) && \
     cmake --build build --config Release -j $(nproc)
 
 # Python packages

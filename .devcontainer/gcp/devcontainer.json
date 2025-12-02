@@ -1,26 +1,37 @@
 {
-  "name": "Neural OptiX Renderer",
+  "name": "Neural OptiX Renderer (GCP GPU)",
 
-  "dockerComposeFile": "docker-compose.yml",
-  "service": "neural-optix-dev",
-  "workspaceFolder": "/workspace",
+  // Use your prebuilt Artifact Registry image
+  // "image": "asia-southeast1-docker.pkg.dev/neural-raytracer/neural-raytracer-docker-repo/neural-optix:sm_75-dev",
+  "image": "lmd-working-tcnn",
 
-  // Set environment variables (docker-compose handles GPU and mounts)
+  "workspaceFolder": "/workspaces/${localWorkspaceFolderBasename}",
+
+  // GPU + debug-friendly runtime settings
+  "runArgs": [
+    "--gpus", "all",
+    "--shm-size=16g",
+    "--cap-add=SYS_PTRACE",
+    "--security-opt=seccomp=unconfined"
+  ],
+
+  // Match the env you already use
   "containerEnv": {
     "OptiX_INSTALL_DIR": "/opt/optix",
-    "TCNN_DIR": "/opt/tiny-cuda-nn"
+    "TCNN_DIR": "/opt/tiny-cuda-nn",
+    "NVIDIA_VISIBLE_DEVICES": "all",
+    "NVIDIA_DRIVER_CAPABILITIES": "compute,utility,graphics"
   },
 
-  // Features to install (optional)
+  // Same devcontainer features as local
   "features": {
     "ghcr.io/devcontainers/features/git:1": {},
     "ghcr.io/devcontainers/features/github-cli:1": {}
   },
 
-  // VSCode settings
+  // Same VS Code setup as your local config
   "customizations": {
     "vscode": {
-      // Extensions to install
       "extensions": [
         "ms-vscode.cpptools",
         "ms-vscode.cmake-tools",
@@ -31,8 +42,6 @@
         "jeff-hykin.better-cpp-syntax",
         "ms-vscode.makefile-tools"
       ],
-
-      // Settings
       "settings": {
         "cmake.buildDirectory": "${workspaceFolder}/build",
         "cmake.configureOnOpen": true,
@@ -58,12 +67,10 @@
     }
   },
 
-  // Post-create command (runs after container is created)
-  "postCreateCommand": "bash .devcontainer/post-create.sh",
-
-  // Post-start command (runs every time container starts)
+  // Reuse the same post-create logic
+  "postCreateCommand": "bash .devcontainer/common/post-create.sh",
   "postStartCommand": "echo 'Neural OptiX Renderer Dev Container Ready!'",
 
-  // User to run as in the container
+  // Only use this if your image actually has a 'developer' user
   "remoteUser": "developer"
 }

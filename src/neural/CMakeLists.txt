@@ -4,6 +4,7 @@ add_library(neural_integration
     network_kernels.cu
     weight_loader.cpp
     config.cpp
+    ../utils/debug_utils.cu
 )
 
 # Mark network.cpp as CUDA source since it includes tiny-cuda-nn headers with device code

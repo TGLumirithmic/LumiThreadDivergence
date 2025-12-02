@@ -35,8 +35,9 @@ Create an OptiX-based ray tracer that can render scenes containing both traditio
    - Implement intersection program (ray-box test, then neural field sampling)
 3. Implement per-ray tiny-cuda-nn inference in closest-hit:
    - Pass network/encoding pointers via launch params
-   - Query network at ray hit position
-   - Use density for alpha compositing, color for radiance
+   - Query network at bounding box surface
+   - Use normal to compute reflection, specular, use depth to determine hit position
+   - Diffuse colour just [1, 1, 1] for now
 4. Render a simple test scene: just the neural asset against a background
 
 **Deliverables:**

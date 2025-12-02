@@ -69,6 +69,14 @@ private:
     void* normal_network_ = nullptr;
     void* depth_network_ = nullptr;
 
+    // Persistent GPU memory for network parameters (must outlive the networks)
+    // Using void* to avoid exposing tcnn::GPUMemory in header
+    void* position_encoder_params_ = nullptr;
+    void* direction_encoder_params_ = nullptr;
+    void* visibility_decoder_params_ = nullptr;
+    void* normal_decoder_params_ = nullptr;
+    void* depth_decoder_params_ = nullptr;
+
     // Temporary device buffers for inference
     float* d_encoded_ = nullptr;            // Position encoding output (float)
     size_t encoded_buffer_size_ = 0;

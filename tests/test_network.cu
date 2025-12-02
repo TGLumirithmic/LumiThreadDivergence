@@ -111,9 +111,9 @@ void test_with_predictions(neural::NeuralNetwork& network,
             // Fill host buffers for this batch
             for (int i = 0; i < current_batch; ++i) {
                 const auto& sample = samples[start + i];
-                h_positions[i * 3 + 0] = sample.origin[0];
-                h_positions[i * 3 + 1] = sample.origin[1];
-                h_positions[i * 3 + 2] = sample.origin[2];
+                h_positions[i * 3 + 0] = (sample.origin[0] + 1.0) / 2;
+                h_positions[i * 3 + 1] = (sample.origin[1] + 1.0) / 2;
+                h_positions[i * 3 + 2] = (sample.origin[2] + 1.0) / 2;
 
                 h_directions[i * 3 + 0] = sample.direction[0];
                 h_directions[i * 3 + 1] = sample.direction[1];
@@ -162,6 +162,7 @@ void test_with_predictions(neural::NeuralNetwork& network,
                               << sample.normal[1] << ", " << sample.normal[2] << "]" << std::endl;
                 }
             }
+            break;
         }
 
         // Cleanup device memory

@@ -6,8 +6,27 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CUDA_STANDARD 17)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 
-# GTX 980 = SM 52
-set(CMAKE_CUDA_ARCHITECTURES 52)
+# Debug build flags
+set(CMAKE_BUILD_TYPE Debug)
+set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -g -O0")
+set(CMAKE_CUDA_FLAGS_DEBUG "${CMAKE_CUDA_FLAGS_DEBUG} -g -G -O0 -lineinfo")
+
+# # GPU Architecture Configuration
+# # For GTX 980: set to 52, For RTX 2080 Ti: 75, For RTX 3090/4090: 86
+# if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+# endif()
+set(CMAKE_CUDA_ARCHITECTURES 75)
+set(TCNN_HALF_PRECISION 1)
+
+# # Half precision configuration (must match how tiny-cuda-nn was built)
+# # For sm_52 (GTX 980): use 0 (OFF)
+# # For sm_75+ (RTX 2080 Ti and newer): can use 1 (ON)
+# if(NOT DEFINED TCNN_HALF_PRECISION)
+#     if(CMAKE_CUDA_ARCHITECTURES GREATER_EQUAL 70)
+#     else()
+#         set(TCNN_HALF_PRECISION 0)
+#     endif()
+# endif()
 
 find_package(CUDAToolkit REQUIRED)
 
@@ -49,10 +68,9 @@ target_include_directories(TCNN::tcnn
 
 # Add required compile definitions for tiny-cuda-nn
 # Note: TCNN_HALF_PRECISION must match how tiny-cuda-nn was built
-# For GTX 980 (sm_52), use float precision (TCNN_HALF_PRECISION=0)
 target_compile_definitions(TCNN::tcnn INTERFACE
-    TCNN_HALF_PRECISION=0               # matches how you built it
-    TCNN_MIN_GPU_ARCH=52                # GTX 980
+    TCNN_HALF_PRECISION=${TCNN_HALF_PRECISION}
+    TCNN_MIN_GPU_ARCH=${CMAKE_CUDA_ARCHITECTURES}
 )
 target_compile_features(TCNN::tcnn INTERFACE cxx_std_17)
 
@@ -66,6 +84,8 @@ target_link_libraries(TCNN::tcnn INTERFACE
 
 
 message(STATUS "tiny-cuda-nn loaded from ${TCNN_PREFIX}")
+message(STATUS "CUDA Architecture: ${CMAKE_CUDA_ARCHITECTURES}")
+message(STATUS "TCNN Half Precision: ${TCNN_HALF_PRECISION}")
 
 # ============================================================
 # Build output dirs

@@ -1,0 +1,3 @@
+docker build -f .devcontainer/Dockerfile -t neural-optix:sm_75-dev --build-arg=CUDA_BASE_IMAGE nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04 --build-arg CUDA_ARCH=75 --build-arg ENABLE_HALF_PRECISION=ON .
+docker tag neural-optix:sm_75-dev asia-southeast1-docker.pkg.dev/neural-raytracer/neural-raytracer-docker-repo/neural-optix:sm_75-dev
+docker push asia-southeast1-docker.pkg.dev/neural-raytracer/neural-raytracer-docker-repo/neural-optix:sm_75-dev

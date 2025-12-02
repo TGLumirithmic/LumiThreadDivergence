@@ -81,7 +81,7 @@ bool WeightLoader::load_from_file(const std::string& path) {
         // Read data
         size_t total_elements = tensor.total_size();
         tensor.data.resize(total_elements);
-        file.read(reinterpret_cast<char*>(tensor.data.data()), total_elements * sizeof(float));
+        file.read(reinterpret_cast<char*>(tensor.data.data()), total_elements * 4); // Hardcode element size because we write out in float32
 
         if (!file.good()) {
             std::cerr << "Error reading tensor: " << tensor.name << std::endl;
@@ -92,6 +92,13 @@ bool WeightLoader::load_from_file(const std::string& path) {
         for (size_t i = 0; i < tensor.shape.size(); ++i) {
             std::cout << tensor.shape[i];
             if (i < tensor.shape.size() - 1) std::cout << "x";
+        }
+        std::cout << "]" << std::endl;
+
+        std::cout << "First 100 elements - [" << std::endl;
+        for (size_t i = 0; i < 100; ++i) {
+            std::cout << tensor.data[i];
+            if (i < 99) std::cout << ", ";
         }
         std::cout << "]" << std::endl;
 
