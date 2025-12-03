@@ -18,7 +18,7 @@ namespace optix {
         }                                                                      \
     } while (0)
 
-#define CUDA_CHECK(call)                                                       \
+#define CU_CHECK(call)                                                         \
     do {                                                                       \
         CUresult res = call;                                                  \
         if (res != CUDA_SUCCESS) {                                            \
@@ -26,7 +26,7 @@ namespace optix {
             cuGetErrorName(res, &err_name);                                   \
             const char* err_str;                                              \
             cuGetErrorString(res, &err_str);                                  \
-            std::cerr << "CUDA call (" << #call << ") failed: "              \
+            std::cerr << "CUDA driver call (" << #call << ") failed: "       \
                       << err_name << " - " << err_str << " ("                 \
                       << __FILE__ << ":" << __LINE__ << ")" << std::endl;     \
             std::exit(EXIT_FAILURE);                                          \
@@ -58,19 +58,19 @@ bool Context::initialize() {
     }
 
     // Initialize CUDA
-    CUDA_CHECK(cuInit(0));
+    CU_CHECK(cuInit(0));
 
     // Get CUDA context
-    CUDA_CHECK(cuCtxGetCurrent(&cuda_context_));
+    CU_CHECK(cuCtxGetCurrent(&cuda_context_));
     if (!cuda_context_) {
         // Create a new CUDA context if none exists
         CUdevice device;
-        CUDA_CHECK(cuDeviceGet(&device, 0));
-        CUDA_CHECK(cuCtxCreate(&cuda_context_, 0, device));
+        CU_CHECK(cuDeviceGet(&device, 0));
+        CU_CHECK(cuCtxCreate(&cuda_context_, 0, device));
     }
 
     // Create CUDA stream
-    CUDA_CALL(cudaStreamCreate(&stream_));
+    CUDA_CHECK(cudaStreamCreate(&stream_));
 
     // Initialize OptiX
     OPTIX_CHECK(optixInit());

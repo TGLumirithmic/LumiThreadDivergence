@@ -15,6 +15,9 @@
         } \
     } while(0)
 
+// Alias for compatibility
+#define CUDA_CALL CUDA_CHECK
+
 // CUDA kernel launch error checking
 #define CUDA_CHECK_LAST() \
     do { \

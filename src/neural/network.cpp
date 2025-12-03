@@ -10,6 +10,8 @@
 #include <tiny-cuda-nn/common.h>
 #include <tiny-cuda-nn/config.h>
 #include <tiny-cuda-nn/encoding.h>
+#include <tiny-cuda-nn/encodings/multi_level_interface.h>
+#include <tiny-cuda-nn/encodings/grid.h>
 #include <tiny-cuda-nn/network.h>
 #include <tiny-cuda-nn/gpu_memory.h>
 
@@ -90,6 +92,13 @@ bool NeuralNetwork::initialize_from_weights(const WeightLoader& loader) {
 
         uint32_t encoding_output_dims = config_.encoding_n_output_dims();
         std::cout << "Encoding output dimensions: " << encoding_output_dims << std::endl;
+        ParamsOffsetTable offset_table = reinterpret_cast<GridEncodingTemplated<precision_t>*>(encoding_)->params_offset_table();
+
+        std::cout << "Hash encoding offset table:" << std::endl;
+        for (int i = 0; i < offset_table.size; i++) {
+            std::cout << "Level " << i << ": " << offset_table.data[i];
+            std::cout << " - " << offset_table.data[i+1] - offset_table.data[i] << std::endl;
+        }
 
         // Create direction encoder if enabled
         uint32_t direction_output_dims = 0;
@@ -542,6 +551,18 @@ void* NeuralNetwork::get_depth_network_ptr() const {
     return depth_network_;
 }
 
+void* NeuralNetwork::get_position_encoder_params_ptr() const {
+    if (!position_encoder_params_) return nullptr;
+    auto* gpu_mem = reinterpret_cast<tcnn::GPUMemory<precision_t>*>(position_encoder_params_);
+    return gpu_mem->data();
+}
+
+void* NeuralNetwork::get_direction_encoder_params_ptr() const {
+    if (!direction_encoder_params_) return nullptr;
+    auto* gpu_mem = reinterpret_cast<tcnn::GPUMemory<precision_t>*>(direction_encoder_params_);
+    return gpu_mem->data();
+}
+
 bool NeuralNetwork::load_position_encoder_weights(const WeightLoader& loader) {
     if (!encoding_) {
         std::cerr << "  Error: Position encoder is null" << std::endl;
@@ -772,6 +793,85 @@ bool NeuralNetwork::load_network_weights(
         std::cerr << "    Error loading weights: " << e.what() << std::endl;
         return false;
     }
+}
+
+void NeuralNetwork::encode_position(
+    const float* d_positions,
+    float* d_encoded,
+    uint32_t batch_size,
+    cudaStream_t stream
+) {
+    if (!initialized_) {
+        throw std::runtime_error("Network not initialized");
+    }
+
+    if (batch_size % BATCH_SIZE_GRANULARITY != 0) {
+        throw std::runtime_error("Batch size must be a multiple of " + std::to_string(BATCH_SIZE_GRANULARITY));
+    }
+
+    auto* encoding = reinterpret_cast<Encoding<precision_t>*>(encoding_);
+    uint32_t pos_encoding_dims = config_.encoding_n_output_dims();
+
+    GPUMatrixDynamic<float> pos_input(const_cast<float*>(d_positions), config_.n_input_dims, batch_size);
+    GPUMatrixDynamic<float> pos_output(d_encoded, pos_encoding_dims, batch_size);
+    encoding->inference(stream, pos_input, pos_output, true);
+
+    if (!stream) CUDA_CHECK(cudaDeviceSynchronize());
+}
+
+void NeuralNetwork::encode_direction(
+    const float* d_directions,
+    float* d_encoded,
+    uint32_t batch_size,
+    cudaStream_t stream
+) {
+    if (!initialized_) {
+        throw std::runtime_error("Network not initialized");
+    }
+
+    if (batch_size % BATCH_SIZE_GRANULARITY != 0) {
+        throw std::runtime_error("Batch size must be a multiple of " + std::to_string(BATCH_SIZE_GRANULARITY));
+    }
+
+    if (!config_.use_direction_encoder || !direction_encoder_) {
+        throw std::runtime_error("Direction encoder not enabled");
+    }
+
+    // Allocate temporary buffers for direction encoding
+    allocate_buffers(batch_size);
+
+    auto* dir_encoder = reinterpret_cast<Network<precision_t>*>(direction_encoder_);
+    uint32_t dir_encoding_dims = config_.direction_encoder_n_output_dims();
+    uint32_t padded_dir_input_dims = ((config_.direction_input_dims + 15) / 16) * 16;
+
+    uint32_t threads = 256;
+    uint32_t blocks = (batch_size + threads - 1) / threads;
+
+#if TCNN_HALF_PRECISION
+    convert_and_pad_direction_kernel<<<blocks, threads, 0, stream>>>(
+        d_directions,
+        reinterpret_cast<__half*>(d_dir_input_float_),
+        batch_size,
+        config_.direction_input_dims,
+        padded_dir_input_dims
+    );
+#else
+    pad_direction_kernel_float<<<blocks, threads, 0, stream>>>(
+        d_directions,
+        d_dir_input_float_,
+        batch_size,
+        config_.direction_input_dims,
+        padded_dir_input_dims
+    );
+#endif
+
+    if (!stream) CUDA_CHECK(cudaDeviceSynchronize());
+
+    GPUMatrixDynamic<precision_t> dir_input(reinterpret_cast<precision_t*>(d_dir_input_float_), padded_dir_input_dims, batch_size);
+    GPUMatrixDynamic<float> dir_output(d_encoded, dir_encoding_dims, batch_size);
+    dir_encoder->inference(stream, dir_input, dir_output, true);
+
+    if (!stream) CUDA_CHECK(cudaDeviceSynchronize());
 }
 
 } // namespace neural

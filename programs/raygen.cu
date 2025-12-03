@@ -1,8 +1,27 @@
 #include <optix.h>
+#include <optix_device.h>
 #include "common.h"
 
 extern "C" {
 __constant__ LaunchParams params;
+}
+
+// CUDA vector math helpers
+static __forceinline__ __device__ float3 operator*(float a, const float3& b) {
+    return make_float3(a * b.x, a * b.y, a * b.z);
+}
+
+static __forceinline__ __device__ float3 operator+(const float3& a, const float3& b) {
+    return make_float3(a.x + b.x, a.y + b.y, a.z + b.z);
+}
+
+static __forceinline__ __device__ float dot(const float3& a, const float3& b) {
+    return a.x * b.x + a.y * b.y + a.z * b.z;
+}
+
+static __forceinline__ __device__ float3 normalize(const float3& v) {
+    float inv_len = rsqrtf(dot(v, v));
+    return make_float3(v.x * inv_len, v.y * inv_len, v.z * inv_len);
 }
 
 // Helper to convert float3_aligned to float3

@@ -1,4 +1,6 @@
 #include "pipeline.h"
+#include <optix_stubs.h>
+#include <optix_stack_size.h>
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -49,14 +51,6 @@ OptixModule Pipeline::create_module(const std::string& ptx_code) {
     module_compile_options.optLevel = OPTIX_COMPILE_OPTIMIZATION_DEFAULT;
     module_compile_options.debugLevel = OPTIX_COMPILE_DEBUG_LEVEL_MODERATE;
 
-    OptixPipelineCompileOptions pipeline_compile_options = {};
-    pipeline_compile_options.usesMotionBlur = false;
-    pipeline_compile_options.traversableGraphFlags = OPTIX_TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_LEVEL_INSTANCING;
-    pipeline_compile_options.numPayloadValues = 3;  // color (float3)
-    pipeline_compile_options.numAttributeValues = 2; // t, primitive_id for custom primitives
-    pipeline_compile_options.exceptionFlags = OPTIX_EXCEPTION_FLAG_NONE;
-    pipeline_compile_options.pipelineLaunchParamsVariableName = "params";
-
     OptixModule module = nullptr;
     char log[2048];
     size_t log_size = sizeof(log);
@@ -64,7 +58,7 @@ OptixModule Pipeline::create_module(const std::string& ptx_code) {
     OPTIX_CHECK(optixModuleCreate(
         context_.get(),
         &module_compile_options,
-        &pipeline_compile_options,
+        &pipeline_compile_options_,
         ptx_code.c_str(),
         ptx_code.size(),
         log,
@@ -80,6 +74,14 @@ OptixModule Pipeline::create_module(const std::string& ptx_code) {
 
 bool Pipeline::build(const std::string& ptx_dir) {
     std::cout << "Building OptiX pipeline from PTX files in: " << ptx_dir << std::endl;
+
+    // Initialize pipeline compile options (used by all modules)
+    pipeline_compile_options_.usesMotionBlur = false;
+    pipeline_compile_options_.traversableGraphFlags = OPTIX_TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_GAS;
+    pipeline_compile_options_.numPayloadValues = 3;  // color (float3)
+    pipeline_compile_options_.numAttributeValues = 2; // t, primitive_id for custom primitives
+    pipeline_compile_options_.exceptionFlags = OPTIX_EXCEPTION_FLAG_NONE;
+    pipeline_compile_options_.pipelineLaunchParamsVariableName = "params";
 
     // Load PTX files
     std::string raygen_ptx = load_ptx_file(ptx_dir + "/raygen.ptx");
@@ -178,13 +180,13 @@ bool Pipeline::build(const std::string& ptx_dir) {
     };
 
     OptixPipelineLinkOptions pipeline_link_options = {};
-    pipeline_link_options.maxTraceDepth = 2;
+    pipeline_link_options.maxTraceDepth = 1;  // Must be 1 for single GAS traversal
 
     char log[2048];
     size_t log_size = sizeof(log);
     OPTIX_CHECK(optixPipelineCreate(
         context_.get(),
-        nullptr,  // pipeline compile options (already set in modules)
+        &pipeline_compile_options_,  // pipeline compile options
         &pipeline_link_options,
         program_groups,
         sizeof(program_groups) / sizeof(program_groups[0]),
@@ -202,7 +204,7 @@ bool Pipeline::build(const std::string& ptx_dir) {
         OPTIX_CHECK(optixUtilAccumulateStackSizes(prog_group, &stack_sizes, pipeline_));
     }
 
-    uint32_t max_trace_depth = 2;
+    uint32_t max_trace_depth = 1;  // Must be 1 for single GAS traversal
     uint32_t max_cc_depth = 0;
     uint32_t max_dc_depth = 0;
     uint32_t direct_callable_stack_size_from_traversal;
@@ -223,7 +225,7 @@ bool Pipeline::build(const std::string& ptx_dir) {
         direct_callable_stack_size_from_traversal,
         direct_callable_stack_size_from_state,
         continuation_stack_size,
-        2));
+        1));  // Must be 1 for single GAS traversal
 
     std::cout << "OptiX pipeline created successfully" << std::endl;
     return true;

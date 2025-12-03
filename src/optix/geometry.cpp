@@ -48,12 +48,14 @@ OptixTraversableHandle GeometryBuilder::build_neural_asset_blas(
     OptixBuildInput build_input = {};
     build_input.type = OPTIX_BUILD_INPUT_TYPE_CUSTOM_PRIMITIVES;
 
-    OptixBuildInputCustomPrimitiveArray& custom_prim_array = build_input.customPrimitiveArray;
-    custom_prim_array.aabbBuffers = (CUdeviceptr*)&d_aabb_buffer_;
-    custom_prim_array.numPrimitives = 1;
-    custom_prim_array.flags = new uint32_t[1];
-    custom_prim_array.flags[0] = OPTIX_GEOMETRY_FLAG_NONE;
-    custom_prim_array.numSbtRecords = 1;
+    // Prepare flags array
+    uint32_t flags[1] = {OPTIX_GEOMETRY_FLAG_NONE};
+    CUdeviceptr aabb_ptr = (CUdeviceptr)d_aabb_buffer_;
+
+    build_input.customPrimitiveArray.aabbBuffers = &aabb_ptr;
+    build_input.customPrimitiveArray.numPrimitives = 1;
+    build_input.customPrimitiveArray.flags = flags;
+    build_input.customPrimitiveArray.numSbtRecords = 1;
 
     // Configure acceleration structure build options
     OptixAccelBuildOptions accel_options = {};
@@ -93,8 +95,6 @@ OptixTraversableHandle GeometryBuilder::build_neural_asset_blas(
 
     CUDA_CALL(cudaStreamSynchronize(context_.get_stream()));
     CUDA_CALL(cudaFree(d_temp_buffer));
-
-    delete[] custom_prim_array.flags;
 
     std::cout << "Neural asset BLAS built successfully" << std::endl;
     return handle;

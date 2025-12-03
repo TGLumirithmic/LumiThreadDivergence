@@ -2,8 +2,8 @@
   "name": "Neural OptiX Renderer (GCP GPU)",
 
   // Use your prebuilt Artifact Registry image
-  // "image": "asia-southeast1-docker.pkg.dev/neural-raytracer/neural-raytracer-docker-repo/neural-optix:sm_75-dev",
-  "image": "lmd-working-tcnn",
+  "image": "asia-southeast1-docker.pkg.dev/neural-raytracer/neural-raytracer-docker-repo/neural-optix:sm_75-dev",
+  // "image": "lmd-working-tcnn",
 
   "workspaceFolder": "/workspaces/${localWorkspaceFolderBasename}",
 
@@ -20,7 +20,7 @@
     "OptiX_INSTALL_DIR": "/opt/optix",
     "TCNN_DIR": "/opt/tiny-cuda-nn",
     "NVIDIA_VISIBLE_DEVICES": "all",
-    "NVIDIA_DRIVER_CAPABILITIES": "compute,utility,graphics"
+    "NVIDIA_DRIVER_CAPABILITIES": "compute,utility,graphics,display"
   },
 
   // Same devcontainer features as local

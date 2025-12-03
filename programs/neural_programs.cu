@@ -1,11 +1,27 @@
 #include <optix.h>
+#include <optix_device.h>
 #include "common.h"
-#include <tiny-cuda-nn/common.h>
-#include <tiny-cuda-nn/encoding.h>
-#include <tiny-cuda-nn/network.h>
 
 extern "C" {
 __constant__ LaunchParams params;
+}
+
+// CUDA vector math helpers
+static __forceinline__ __device__ float3 operator*(float a, const float3& b) {
+    return make_float3(a * b.x, a * b.y, a * b.z);
+}
+
+static __forceinline__ __device__ float3 operator+(const float3& a, const float3& b) {
+    return make_float3(a.x + b.x, a.y + b.y, a.z + b.z);
+}
+
+static __forceinline__ __device__ float dot(const float3& a, const float3& b) {
+    return a.x * b.x + a.y * b.y + a.z * b.z;
+}
+
+static __forceinline__ __device__ float3 normalize(const float3& v) {
+    float inv_len = rsqrtf(dot(v, v));
+    return make_float3(v.x * inv_len, v.y * inv_len, v.z * inv_len);
 }
 
 // Simple ray-AABB intersection test
@@ -80,7 +96,7 @@ extern "C" __global__ void __intersection__neural() {
 }
 
 // Closest-hit program for neural asset
-// This is where we call the neural network
+// Calls custom neural network inference
 extern "C" __global__ void __closesthit__neural() {
     // Get ray information
     const float3 ray_orig = optixGetWorldRayOrigin();
@@ -90,14 +106,7 @@ extern "C" __global__ void __closesthit__neural() {
     // Compute hit position
     const float3 hit_pos = ray_orig + t_hit * ray_dir;
 
-    // For Phase 2, we'll do a simple visualization without full neural inference
-    // In a complete implementation, we would:
-    // 1. Call encoding on hit_pos
-    // 2. Call the decoders (visibility, normal, depth)
-    // 3. Use the outputs to compute color
-
-    // Simple color based on position (for now)
-    // This will be replaced with actual neural network inference
+    // Normalize position to [0, 1]^3 (neural network input space)
     const float3 normalized_pos = make_float3(
         (hit_pos.x - params.neural_bounds.min.x) /
             (params.neural_bounds.max.x - params.neural_bounds.min.x),
@@ -107,11 +116,55 @@ extern "C" __global__ void __closesthit__neural() {
             (params.neural_bounds.max.z - params.neural_bounds.min.z)
     );
 
-    // Visualize position as color (temporary - will be replaced with neural inference)
+    // Normalize ray direction (should already be normalized, but ensure)
+    const float3 normalized_dir = normalize(ray_dir);
+
+    // Run neural network inference
+    float visibility;
+    float3 predicted_normal;
+    float depth;
+
+    neural_inference(
+        normalized_pos,
+        normalized_dir,
+        params.neural_network,
+        visibility,
+        predicted_normal,
+        depth
+    );
+
+    // Compute final color using network outputs
+    // For now: simple shading with predicted normal
+    // Visibility modulates opacity, normal determines lighting
+
+    // Normalize the predicted normal
+    float3 normal = normalize(predicted_normal);
+
+    // Simple diffuse shading with a directional light
+    // Light direction (world space, pointing down and to the side)
+    const float3 light_dir = normalize(make_float3(0.5f, -1.0f, 0.3f));
+
+    // Diffuse term: max(0, -dot(normal, light_dir))
+    // Negative because light_dir points toward light source
+    float diffuse = fmaxf(0.0f, -dot(normal, light_dir));
+
+    // Ambient term
+    float ambient = 0.2f;
+
+    // Combine lighting
+    float lighting = ambient + (1.0f - ambient) * diffuse;
+
+    // Apply visibility (opacity)
+    lighting *= (visibility >= 0.5) ? 1.0: 0.0;
+
+    // Base color (white for now)
+    const float3 base_color = make_float3(1.0f, 1.0f, 1.0f);
+
+    // Final color
     const float3 color = make_float3(
-        normalized_pos.x,
-        normalized_pos.y,
-        normalized_pos.z
+        base_color.x * lighting,
+        base_color.y * lighting,
+        base_color.z * lighting
     );
 
     // Set payload

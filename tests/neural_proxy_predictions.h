@@ -193,7 +193,7 @@ private:
         file_.read(reinterpret_cast<char*>(&header_.kd_uses_dfl), sizeof(uint8_t));
         file_.read(reinterpret_cast<char*>(&header_.has_hash_grid), sizeof(uint8_t));
         file_.read(reinterpret_cast<char*>(&header_.has_direction_encodings), sizeof(uint8_t));
-        file_.read(reinterpret_cast<char*>(header_.padding), 1);  // Read 3 padding bytes
+        file_.read(reinterpret_cast<char*>(&header_.padding), 1);  // Read 1 padding byte
         file_.read(reinterpret_cast<char*>(&header_.dfl_num_edges), sizeof(uint32_t));
         file_.read(reinterpret_cast<char*>(&header_.hash_grid_dim), sizeof(uint32_t));
         file_.read(reinterpret_cast<char*>(header_.mesh_name), MESH_NAME_SIZE);
@@ -209,6 +209,7 @@ private:
                                     std::to_string(header_.version));
         }
     }
+
 
     std::ifstream file_;
     Header header_;

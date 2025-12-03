@@ -1,7 +1,9 @@
 #pragma once
 
+#include <stdint.h>
 #include <cuda_runtime.h>
 #include <optix.h>
+#include "neural_inference.cuh"
 
 // Simple 3D vector structure
 struct float3_aligned {
@@ -44,11 +46,8 @@ struct LaunchParams {
     // Scene traversal
     OptixTraversableHandle traversable;
 
-    // Neural network device pointers (from tiny-cuda-nn)
-    void* encoding_ptr;
-    void* visibility_network_ptr;
-    void* normal_network_ptr;
-    void* depth_network_ptr;
+    // Neural network parameters (custom OptiX-compatible implementation)
+    NeuralNetworkParams neural_network;
 
     // Neural asset bounds
     NeuralAssetBounds neural_bounds;

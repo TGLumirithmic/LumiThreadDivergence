@@ -20,30 +20,52 @@ Create an OptiX-based ray tracer that can render scenes containing both traditio
 - Test output showing network produces reasonable density/color fields
 - Documentation of weight format and loading procedure
 
-## Phase 2: Basic OptiX + Tiny-cuda-nn Integration
-**Goal:** Call tiny-cuda-nn from OptiX device code and render a single neural asset.
+## Phase 2: OptiX Integration with Custom Neural Network Implementation
+**Goal:** Render a single neural asset using custom CUDA kernels (not calling tiny-cuda-nn from OptiX).
+
+**Approach Change:**
+Since tiny-cuda-nn cannot be called directly from OptiX device code (OptiX programs run in a restricted context), we will:
+1. Use tiny-cuda-nn for **training only** (Python/PyTorch side)
+2. Export trained weights from tiny-cuda-nn
+3. **Reimplement the network inference in custom CUDA kernels** that can run inside OptiX programs
+4. Load the pre-trained weights into our custom implementation
 
 **Tasks:**
 1. Create minimal OptiX pipeline with:
-   - Ray generation program
-   - Miss program (background color)
-   - Custom intersection program for neural asset AABB
-   - Closest-hit program that calls tiny-cuda-nn inference
+   - Ray generation program ✓
+   - Miss program (background color) ✓
+   - Custom intersection program for neural asset AABB ✓
+   - Closest-hit program that calls custom neural inference kernels
 2. Set up neural asset as custom primitive:
-   - Define bounding box (AABB)
+   - Define bounding box (AABB) ✓
    - Build BLAS with `OPTIX_BUILD_INPUT_TYPE_CUSTOM_PRIMITIVES`
-   - Implement intersection program (ray-box test, then neural field sampling)
-3. Implement per-ray tiny-cuda-nn inference in closest-hit:
-   - Pass network/encoding pointers via launch params
-   - Query network at bounding box surface
+   - Implement intersection program (ray-box test, then neural field sampling) ✓
+3. **Implement custom CUDA kernels for neural inference** (callable from OptiX):
+   - Hash grid encoding (matching tiny-cuda-nn's HashGrid implementation)
+   - Fully-fused MLP layers (or simplified MLP with similar architecture)
+   - Direction encoder MLP
+   - Three decoder MLPs (visibility, normal, depth)
+   - All kernels must be `__device__` functions callable from OptiX programs
+4. Implement per-ray neural inference in closest-hit:
+   - Pass network weight pointers via launch params
+   - Query network at hit point on bounding box surface
    - Use normal to compute reflection, specular, use depth to determine hit position
    - Diffuse colour just [1, 1, 1] for now
-4. Render a simple test scene: just the neural asset against a background
+5. Render a simple test scene: just the neural asset against a background
+
+**Implementation Notes:**
+- Network weights will be stored in device memory, passed via `LaunchParams`
+- Hash grid parameters: hash table, grid resolution, interpolation coefficients
+- MLP weights: organized as layer-by-layer matrices
+- Activation functions: ReLU, Sigmoid (as needed)
+- All computations must be single-threaded (per-ray) inside OptiX programs
 
 **Deliverables:**
-- OptiX program that renders a single neural asset
+- Custom CUDA neural network kernels compatible with OptiX device code
+- Weight loading system that reads tiny-cuda-nn exported weights
+- OptiX program that renders a single neural asset using custom inference
 - Image output showing recognizable neural field (should match PyTorch training results)
-- Verified that tiny-cuda-nn device functions are callable from OptiX kernels
+- Validation that outputs match tiny-cuda-nn inference (within tolerance)
 
 ## Phase 3: Mixed Geometry Types
 **Goal:** Support both triangle meshes and neural assets in the same scene.
@@ -59,8 +81,8 @@ Create an OptiX-based ray tracer that can render scenes containing both traditio
    - Implement instance lookup in hit programs to determine geometry type
 3. Implement basic path tracing or direct lighting:
    - Single point light
-   - Simple material model (diffuse for meshes, volumetric for neural assets)
-4. Test scene: room with walls/floor (triangles) + single neural asset
+   - Simple material model (diffuse for meshes and neural assets)
+4. Test scene: room with walls/floor (triangles), top-down light source + single neural asset
 
 **Deliverables:**
 - Scene with mixed geometry types rendering correctly

@@ -43,6 +43,9 @@ private:
     OptixProgramGroup miss_group_ = nullptr;
     OptixProgramGroup neural_hit_group_ = nullptr;
 
+    // Pipeline compile options (needed for pipeline creation)
+    OptixPipelineCompileOptions pipeline_compile_options_ = {};
+
     // Helper functions
     OptixModule create_module(const std::string& ptx_code);
     std::string load_ptx_file(const std::string& filename);

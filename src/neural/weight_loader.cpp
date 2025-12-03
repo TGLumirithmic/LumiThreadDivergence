@@ -88,20 +88,6 @@ bool WeightLoader::load_from_file(const std::string& path) {
             return false;
         }
 
-        std::cout << "  Loaded: " << tensor.name << " - [";
-        for (size_t i = 0; i < tensor.shape.size(); ++i) {
-            std::cout << tensor.shape[i];
-            if (i < tensor.shape.size() - 1) std::cout << "x";
-        }
-        std::cout << "]" << std::endl;
-
-        std::cout << "First 100 elements - [" << std::endl;
-        for (size_t i = 0; i < 100; ++i) {
-            std::cout << tensor.data[i];
-            if (i < 99) std::cout << ", ";
-        }
-        std::cout << "]" << std::endl;
-
         tensors_[tensor.name] = std::move(tensor);
     }
 

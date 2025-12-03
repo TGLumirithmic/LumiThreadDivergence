@@ -3,15 +3,47 @@
 #include <vector>
 #include <cmath>
 
+#include <optix.h>
+#include <cuda_runtime.h>
+
 #include "optix/context.h"
 #include "optix/pipeline.h"
 #include "optix/geometry.h"
 #include "optix/sbt.h"
-#include "neural/network.h"
+#include "optix/neural_params.h"
 #include "neural/weight_loader.h"
 #include "neural/config.h"
-#include "programs/common.h"
 #include "utils/error.h"
+
+// Simple 3D vector structure (matches common.h)
+struct float3_aligned {
+    float x, y, z;
+};
+
+// Camera parameters
+struct Camera {
+    float3_aligned position;
+    float3_aligned u, v, w;  // Camera basis vectors
+    float fov;
+};
+
+// Neural asset bounds
+struct NeuralAssetBounds {
+    float3_aligned min;
+    float3_aligned max;
+};
+
+// Launch parameters - must exactly match programs/common.h
+struct LaunchParams {
+    uchar4* frame_buffer;
+    uint32_t width;
+    uint32_t height;
+    Camera camera;
+    OptixTraversableHandle traversable;
+    NeuralNetworkParams neural_network;
+    NeuralAssetBounds neural_bounds;
+    float3_aligned background_color;
+};
 
 // Simple PPM image writer
 void write_ppm(const std::string& filename, const uchar4* pixels, int width, int height) {
@@ -35,7 +67,7 @@ int main(int argc, char** argv) {
     std::cout << "=== OptiX Neural Renderer - Phase 2 ===" << std::endl;
 
     // Parse command line arguments
-    std::string weight_file = "data/models/model.bin";
+    std::string weight_file = "data/models/weights.bin";
     std::string output_file = "output/neural_render.ppm";
     int width = 512;
     int height = 512;
@@ -57,38 +89,44 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    // Load neural network (Phase 1 functionality)
+    // Configure neural network
     neural::NetworkConfig network_config;
-    // Use default Instant-NGP configuration
     network_config.n_levels = 16;
     network_config.n_features_per_level = 2;
-    network_config.log2_hashmap_size = 19;
+    network_config.log2_hashmap_size = 14;
     network_config.base_resolution = 16.0f;
-    network_config.max_resolution = 2048.0f;
-    network_config.n_hidden_layers = 2;
-    network_config.n_neurons = 64;
+    network_config.max_resolution = 1024.0f;
+    network_config.n_neurons = 32;
+    network_config.direction_hidden_dim = 16;
+    network_config.direction_n_hidden_layers = 1;
+    network_config.visibility_decoder.n_decoder_layers = 4;
+    network_config.normal_decoder.n_decoder_layers = 4;
+    network_config.depth_decoder.n_decoder_layers = 4;
 
-    neural::NeuralNetwork network(network_config);
-
-    // Try to load weights (optional for Phase 2)
+    // Load weights and convert to OptiX format
     neural::WeightLoader weight_loader;
-    if (weight_loader.load(weight_file)) {
+    optix::NeuralNetworkParamsHost neural_params(network_config);
+
+    bool weights_loaded = false;
+    if (weight_loader.load_from_file(weight_file)) {
         std::cout << "Loaded weights from: " << weight_file << std::endl;
-        if (network.initialize_from_weights(weight_loader)) {
-            std::cout << "Neural network initialized from weights" << std::endl;
+        if (neural_params.load_from_weights(weight_loader)) {
+            std::cout << "Neural network parameters converted for OptiX" << std::endl;
+            weights_loaded = true;
         } else {
-            std::cout << "Warning: Failed to initialize network from weights" << std::endl;
-            std::cout << "Continuing with visualization only..." << std::endl;
+            std::cerr << "Warning: Failed to convert weights for OptiX" << std::endl;
         }
     } else {
-        std::cout << "Warning: Could not load weights from " << weight_file << std::endl;
-        std::cout << "Continuing with position-based visualization..." << std::endl;
+        std::cerr << "Warning: Could not load weights from " << weight_file << std::endl;
+        std::cerr << "You need to provide a valid weight file to render neural assets" << std::endl;
+        return 1;
     }
 
     // Build OptiX pipeline
     optix::Pipeline pipeline(context);
     if (!pipeline.build("build/lib")) {
         std::cerr << "Failed to build OptiX pipeline" << std::endl;
+        std::cerr << "Make sure PTX files are in build/lib/ directory" << std::endl;
         return 1;
     }
 
@@ -110,7 +148,7 @@ int main(int argc, char** argv) {
 
     // Allocate frame buffer
     uchar4* d_frame_buffer = nullptr;
-    CUDA_CALL(cudaMalloc(&d_frame_buffer, width * height * sizeof(uchar4)));
+    CUDA_CHECK(cudaMalloc(&d_frame_buffer, width * height * sizeof(uchar4)));
 
     // Set up launch parameters
     LaunchParams launch_params = {};
@@ -118,6 +156,9 @@ int main(int argc, char** argv) {
     launch_params.width = width;
     launch_params.height = height;
     launch_params.traversable = traversable;
+
+    // Copy neural network parameters
+    launch_params.neural_network = neural_params.get_device_params();
 
     // Set up camera (looking at the cube from a distance)
     float camera_distance = 3.0f;
@@ -133,12 +174,6 @@ int main(int argc, char** argv) {
     launch_params.camera.v = {0.0f, vfov_size, 0.0f};
     launch_params.camera.w = {0.0f, 0.0f, -1.0f};
 
-    // Neural network pointers (for future use)
-    launch_params.encoding_ptr = network.get_encoding_device_ptr();
-    launch_params.visibility_network_ptr = network.get_visibility_network_ptr();
-    launch_params.normal_network_ptr = network.get_normal_network_ptr();
-    launch_params.depth_network_ptr = network.get_depth_network_ptr();
-
     // Neural bounds
     launch_params.neural_bounds.min = {neural_min.x, neural_min.y, neural_min.z};
     launch_params.neural_bounds.max = {neural_max.x, neural_max.y, neural_max.z};
@@ -148,15 +183,15 @@ int main(int argc, char** argv) {
 
     // Upload launch parameters to device
     LaunchParams* d_launch_params = nullptr;
-    CUDA_CALL(cudaMalloc(&d_launch_params, sizeof(LaunchParams)));
-    CUDA_CALL(cudaMemcpy(
+    CUDA_CHECK(cudaMalloc(&d_launch_params, sizeof(LaunchParams)));
+    CUDA_CHECK(cudaMemcpy(
         d_launch_params,
         &launch_params,
         sizeof(LaunchParams),
         cudaMemcpyHostToDevice));
 
     // Launch rendering
-    std::cout << "Launching OptiX rendering..." << std::endl;
+    std::cout << "\nLaunching OptiX rendering..." << std::endl;
 
     OptixResult result = optixLaunch(
         pipeline.get(),
@@ -171,15 +206,16 @@ int main(int argc, char** argv) {
 
     if (result != OPTIX_SUCCESS) {
         std::cerr << "optixLaunch failed: " << optixGetErrorName(result) << std::endl;
+        std::cerr << "  " << optixGetErrorString(result) << std::endl;
         return 1;
     }
 
-    CUDA_CALL(cudaStreamSynchronize(context.get_stream()));
+    CUDA_CHECK(cudaStreamSynchronize(context.get_stream()));
     std::cout << "Rendering complete!" << std::endl;
 
     // Download frame buffer
     std::vector<uchar4> h_frame_buffer(width * height);
-    CUDA_CALL(cudaMemcpy(
+    CUDA_CHECK(cudaMemcpy(
         h_frame_buffer.data(),
         d_frame_buffer,
         width * height * sizeof(uchar4),
@@ -192,6 +228,7 @@ int main(int argc, char** argv) {
     cudaFree(d_frame_buffer);
     cudaFree(d_launch_params);
 
-    std::cout << "Done!" << std::endl;
+    std::cout << "\n=== Rendering Complete ===" << std::endl;
+    std::cout << "Output saved to: " << output_file << std::endl;
     return 0;
 }

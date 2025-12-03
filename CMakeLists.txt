@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.18 FATAL_ERROR)
+cmake_minimum_required(VERSION 3.24 FATAL_ERROR)
 project(NeuralOptiXRenderer LANGUAGES CXX CUDA)
 
 set(CMAKE_CXX_STANDARD 17)
@@ -123,3 +123,21 @@ add_subdirectory(src/neural)
 add_subdirectory(src/optix)
 add_subdirectory(programs)
 add_subdirectory(tests)
+
+# # ============================================================
+# # Main renderer executable
+# # ============================================================
+add_executable(renderer src/main.cpp)
+target_link_libraries(renderer
+    neural_integration
+    optix_host
+    CUDA::nvrtc
+    CUDA::cudart
+    CUDA::cuda_driver
+    ${CMAKE_DL_LIBS}
+)
+
+target_link_options(renderer PRIVATE "-Wl,--no-as-needed")
+
+# Make sure PTX files are compiled before building renderer
+add_dependencies(renderer raygen miss neural)

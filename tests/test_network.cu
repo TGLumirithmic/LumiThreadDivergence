@@ -18,6 +18,7 @@
 #include "../src/neural/config.h"
 #include "../src/utils/cuda_utils.h"
 #include "../src/utils/error.h"
+#include "../src/utils/debug_utils.h"
 #include "neural_proxy_predictions.h"
 
 // Simple PPM image writer for visualization
@@ -67,6 +68,140 @@ void generate_test_grid(std::vector<float>& positions,
             positions[idx + 1] = y / float(height);  // y
             positions[idx + 2] = z_plane;                             // z
         }
+    }
+}
+
+// Test intermediate encodings against ground truth
+void test_intermediate_encodings(neural::NeuralNetwork& network,
+                                 const std::string& prediction_file,
+                                 int num_samples = 256) {
+    std::cout << "\n=== Testing Intermediate Encodings ===" << std::endl;
+
+    try {
+        neural_proxy::PredictionReader reader(prediction_file);
+        const auto& header = reader.header();
+
+        if (!header.has_hash_grid || !header.has_direction_encodings) {
+            std::cout << "Prediction file does not have intermediate encodings, skipping test" << std::endl;
+            return;
+        }
+
+        auto samples = reader.read_all();
+        // Round to multiple of 256 (required by tiny-cuda-nn)
+        num_samples = std::min(num_samples, (int)samples.size());
+        num_samples = (num_samples / 256) * 256;
+        if (num_samples == 0) num_samples = 256;
+        std::cout << "Testing first " << num_samples << " samples" << std::endl;
+
+        // Allocate buffers
+        std::vector<float> h_positions(num_samples * 3);
+        std::vector<float> h_directions(num_samples * 3);
+        std::vector<float> h_hash_out(num_samples * 32);
+        std::vector<float> h_dir_out(num_samples * 16);
+
+        float* d_positions = cuda_utils::allocate_device<float>(num_samples * 3);
+        float* d_directions = cuda_utils::allocate_device<float>(num_samples * 3);
+        float* d_hash_out = cuda_utils::allocate_device<float>(num_samples * 32);
+        float* d_dir_out = cuda_utils::allocate_device<float>(num_samples * 16);
+
+        // Prepare inputs
+        for (int i = 0; i < num_samples; ++i) {
+            h_positions[i * 3 + 0] = (samples[i].origin[0] + 1.0f) / 2.0f;
+            h_positions[i * 3 + 1] = (samples[i].origin[1] + 1.0f) / 2.0f;
+            h_positions[i * 3 + 2] = (samples[i].origin[2] + 1.0f) / 2.0f;
+
+            h_directions[i * 3 + 0] = samples[i].direction[0];
+            h_directions[i * 3 + 1] = samples[i].direction[1];
+            h_directions[i * 3 + 2] = samples[i].direction[2];
+        }
+
+        cuda_utils::copy_to_device(d_positions, h_positions.data(), num_samples * 3);
+        cuda_utils::copy_to_device(d_directions, h_directions.data(), num_samples * 3);
+
+        // Print first 10 hash table weights for debugging
+        const float* hash_params = reinterpret_cast<const float*>(network.get_position_encoder_params_ptr());
+        if (hash_params) {
+            debug_utils::print_buffer_values(hash_params, 10, "tiny-cuda-nn Hash Table");
+        }
+
+        // Print first 10 direction encoder weights for debugging
+        const float* dir_params = reinterpret_cast<const float*>(network.get_direction_encoder_params_ptr());
+        if (dir_params) {
+            debug_utils::print_buffer_values(dir_params, 10, "tiny-cuda-nn Dir Encoder Layer 0");
+        }
+
+        // Test hash encoding
+        network.encode_position(d_positions, d_hash_out, num_samples);
+        CUDA_SYNC_CHECK();
+        cuda_utils::copy_to_host(h_hash_out.data(), d_hash_out, num_samples * 32);
+
+        double total_hash_error = 0.0;
+        double max_hash_error = 0.0;
+        std::cout << "\nHash Encoding Comparison (first 3 samples):" << std::endl;
+        for (int i = 0; i < std::min(3, num_samples); ++i) {
+            std::cout << "Sample " << i << " (first 4 features):" << std::endl;
+            for (int j = 0; j < 32; ++j) {
+                float gt = samples[i].hash_grid[j];
+                float pred = h_hash_out[i * 32 + j];
+                double error = std::abs(gt - pred);
+                std::cout << "  [" << j << "] GT: " << gt << ", Pred: " << pred << ", Error: " << error << std::endl;
+            }
+        }
+
+        for (int i = 0; i < num_samples; ++i) {
+            for (int j = 0; j < 32; ++j) {
+                float gt = samples[i].hash_grid[j];
+                float pred = h_hash_out[i * 32 + j];
+                double error = std::abs(gt - pred);
+                total_hash_error += error;
+                max_hash_error = std::max(max_hash_error, error);
+            }
+        }
+
+        std::cout << "\nHash Encoding Results:" << std::endl;
+        std::cout << "  Mean L1 error: " << (total_hash_error / (num_samples * 32)) << std::endl;
+        std::cout << "  Max error: " << max_hash_error << std::endl;
+
+        // Test direction encoding
+        network.encode_direction(d_directions, d_dir_out, num_samples);
+        CUDA_SYNC_CHECK();
+        cuda_utils::copy_to_host(h_dir_out.data(), d_dir_out, num_samples * 16);
+
+        double total_dir_error = 0.0;
+        double max_dir_error = 0.0;
+        std::cout << "\nDirection Encoding Comparison (first 3 samples):" << std::endl;
+        for (int i = 0; i < std::min(3, num_samples); ++i) {
+            std::cout << "Sample " << i << " (first 4 features):" << std::endl;
+            for (int j = 0; j < 4; ++j) {
+                float gt = samples[i].direction_encodings[j];
+                float pred = h_dir_out[i * 16 + j];
+                double error = std::abs(gt - pred);
+                std::cout << "  [" << j << "] GT: " << gt << ", Pred: " << pred << ", Error: " << error << std::endl;
+            }
+        }
+
+        for (int i = 0; i < num_samples; ++i) {
+            for (int j = 0; j < 16; ++j) {
+                float gt = samples[i].direction_encodings[j];
+                float pred = h_dir_out[i * 16 + j];
+                double error = std::abs(gt - pred);
+                total_dir_error += error;
+                max_dir_error = std::max(max_dir_error, error);
+            }
+        }
+
+        std::cout << "\nDirection Encoding Results:" << std::endl;
+        std::cout << "  Mean L1 error: " << (total_dir_error / (num_samples * 16)) << std::endl;
+        std::cout << "  Max error: " << max_dir_error << std::endl;
+
+        // Cleanup
+        cuda_utils::free_device(d_positions);
+        cuda_utils::free_device(d_directions);
+        cuda_utils::free_device(d_hash_out);
+        cuda_utils::free_device(d_dir_out);
+
+    } catch (const std::exception& e) {
+        std::cerr << "Error testing encodings: " << e.what() << std::endl;
     }
 }
 
@@ -365,6 +500,7 @@ int main(int argc, char** argv) {
 
         // Run tests
         if (!predictions_file.empty()) {
+            test_intermediate_encodings(network, predictions_file);
             test_with_predictions(network, predictions_file);
         }
 

@@ -15,11 +15,7 @@ function(add_ptx_target target_name cuda_file)
             -I${OptiX_INCLUDE}
             -I${CMAKE_CURRENT_SOURCE_DIR}
             -I${CMAKE_CURRENT_SOURCE_DIR}/..
-            -I${TCNN_INCLUDE_DIR}
-            -I${TCNN_DEPS_DIR}
             -I${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}
-            -DTCNN_HALF_PRECISION=${TCNN_HALF_PRECISION}
-            -DTCNN_MIN_GPU_ARCH=${CMAKE_CUDA_ARCHITECTURES}
             ${CMAKE_CURRENT_SOURCE_DIR}/${cuda_file}
             -o ${output_file}
         DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/${cuda_file}

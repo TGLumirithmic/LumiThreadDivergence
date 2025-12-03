@@ -45,6 +45,21 @@ public:
         float& depth             // output on host
     );
 
+    // Expose intermediate encodings for testing
+    void encode_position(
+        const float* d_positions,
+        float* d_encoded,
+        uint32_t batch_size,
+        cudaStream_t stream = nullptr
+    );
+
+    void encode_direction(
+        const float* d_directions,
+        float* d_encoded,
+        uint32_t batch_size,
+        cudaStream_t stream = nullptr
+    );
+
     // Get network configuration
     const NetworkConfig& config() const { return config_; }
 
@@ -56,6 +71,10 @@ public:
     void* get_visibility_network_ptr() const;
     void* get_normal_network_ptr() const;
     void* get_depth_network_ptr() const;
+
+    // Get raw weight pointers for debugging
+    void* get_position_encoder_params_ptr() const;
+    void* get_direction_encoder_params_ptr() const;
 
 private:
     NetworkConfig config_;
