@@ -33,6 +33,13 @@ struct NeuralAssetBounds {
     float3_aligned max;
 };
 
+// Point light structure
+struct PointLight {
+    float3_aligned position;
+    float3_aligned color;
+    float intensity;
+};
+
 // Launch parameters - shared between host and device
 struct LaunchParams {
     // Output buffers
@@ -54,6 +61,9 @@ struct LaunchParams {
 
     // Neural asset bounds
     NeuralAssetBounds neural_bounds;
+
+    // Lighting
+    PointLight light;
 
     // Background color
     float3_aligned background_color;

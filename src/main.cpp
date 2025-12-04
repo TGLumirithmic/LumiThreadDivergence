@@ -9,6 +9,8 @@
 #include "optix/context.h"
 #include "optix/pipeline.h"
 #include "optix/geometry.h"
+#include "optix/triangle_geometry.h"
+#include "optix/tlas_builder.h"
 #include "optix/sbt.h"
 #include "optix/neural_params.h"
 #include "neural/weight_loader.h"
@@ -33,6 +35,13 @@ struct NeuralAssetBounds {
     float3_aligned max;
 };
 
+// Point light structure
+struct PointLight {
+    float3_aligned position;
+    float3_aligned color;
+    float intensity;
+};
+
 // Launch parameters - must exactly match programs/common.h
 struct LaunchParams {
     uchar4* frame_buffer;
@@ -45,6 +54,7 @@ struct LaunchParams {
     OptixTraversableHandle traversable;
     NeuralNetworkParams neural_network;
     NeuralAssetBounds neural_bounds;
+    PointLight light;
     float3_aligned background_color;
 };
 
@@ -67,7 +77,7 @@ void write_ppm(const std::string& filename, const uchar4* pixels, int width, int
 }
 
 int main(int argc, char** argv) {
-    std::cout << "=== OptiX Neural Renderer - Phase 2 ===" << std::endl;
+    std::cout << "=== OptiX Neural Renderer - Phase 3 ===" << std::endl;
 
     // Parse command line arguments
     std::string weight_file = "data/models/weights.bin";
@@ -137,10 +147,46 @@ int main(int argc, char** argv) {
     float3 neural_min = make_float3(-1.0f, -1.0f, -1.0f);
     float3 neural_max = make_float3(1.0f, 1.0f, 1.0f);
 
-    // Build geometry (BLAS for neural asset)
-    optix::GeometryBuilder geom_builder(context);
-    OptixTraversableHandle traversable = geom_builder.build_neural_asset_blas(
+    // Build triangle geometry BLASes
+    std::cout << "\nBuilding triangle geometry..." << std::endl;
+    optix::TriangleGeometry triangle_geom(context);
+    OptixTraversableHandle floor_blas = triangle_geom.build_floor_blas();
+    OptixTraversableHandle walls_blas = triangle_geom.build_walls_blas();
+
+    // Build neural asset BLAS
+    std::cout << "\nBuilding neural asset geometry..." << std::endl;
+    optix::GeometryBuilder neural_geom(context);
+    OptixTraversableHandle neural_blas = neural_geom.build_neural_asset_blas(
         neural_min, neural_max);
+
+    // Build TLAS with all instances
+    std::cout << "\nBuilding TLAS with mixed geometry..." << std::endl;
+    optix::TLASBuilder tlas_builder(context);
+
+    // Identity transform
+    float identity[12] = {
+        1.0f, 0.0f, 0.0f, 0.0f,
+        0.0f, 1.0f, 0.0f, 0.0f,
+        0.0f, 0.0f, 1.0f, 0.0f
+    };
+
+    // Add floor instance (instanceId=0, sbtOffset=0 for triangles)
+    tlas_builder.add_instance(floor_blas, 0, 0, identity);
+
+    // Add walls instance (instanceId=1, sbtOffset=0 for triangles)
+    tlas_builder.add_instance(walls_blas, 1, 0, identity);
+
+    // Add neural asset instance (instanceId=2, sbtOffset=2 for neural)
+    // Position it 1 unit above the floor (floor is at Y=-1, neural BLAS is [-1,1], so translate by 1.0 to sit on floor)
+    float neural_transform[12] = {
+        1.0f, 0.0f, 0.0f, 0.0f,
+        0.0f, 1.0f, 0.0f, 1.0f,  // Translate Y=1.0 (places bottom of neural asset at Y=0, which is 1 unit above floor at Y=-1)
+        0.0f, 0.0f, 1.0f, 0.0f
+    };
+    tlas_builder.add_instance(neural_blas, 2, 2, neural_transform);
+
+    // Build the TLAS
+    OptixTraversableHandle traversable = tlas_builder.build();
 
     // Build shader binding table
     optix::ShaderBindingTable sbt(context, pipeline);
@@ -172,12 +218,11 @@ int main(int argc, char** argv) {
     // Copy neural network parameters
     launch_params.neural_network = neural_params.get_device_params();
 
-    // Set up camera (looking at the cube from a distance)
-    float camera_distance = 3.0f;
-    launch_params.camera.position = {0.0f, 0.0f, camera_distance};
+    // Set up camera (view from angle to see both floor and neural asset)
+    launch_params.camera.position = {3.0f, 2.0f, 5.0f};
     launch_params.camera.fov = 90.0f;
 
-    // Camera basis vectors (standard OpenGL-style camera)
+    // Camera basis vectors (looking toward origin)
     float aspect = (float)width / (float)height;
     float vfov = launch_params.camera.fov * M_PI / 180.0f;
     float vfov_size = std::tan(vfov / 2.0f);
@@ -189,6 +234,11 @@ int main(int argc, char** argv) {
     // Neural bounds
     launch_params.neural_bounds.min = {neural_min.x, neural_min.y, neural_min.z};
     launch_params.neural_bounds.max = {neural_max.x, neural_max.y, neural_max.z};
+
+    // Setup point light (above the scene)
+    launch_params.light.position = {0.0f, 3.0f, 0.0f};
+    launch_params.light.color = {1.0f, 1.0f, 1.0f};
+    launch_params.light.intensity = 100.0f;
 
     // Background color (dark gray)
     launch_params.background_color = {0.1f, 0.1f, 0.15f};

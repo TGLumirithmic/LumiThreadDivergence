@@ -177,9 +177,11 @@ scene:
 
 ## Future Extensions (Not in Initial Scope)
 - Real-time divergence overlay visualization
+- Dynamic scene - camera trajectory
 - Multiple neural assets with different weights
 - More complex lighting (global illumination)
 - Batch inference optimization
+- Interactivity
 
 ## Notes on Divergence Measurement
 For now, we're focusing on getting the infrastructure working. Divergence analysis will be done via Nsight Compute post-processing:

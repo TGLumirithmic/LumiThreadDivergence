@@ -3,6 +3,8 @@ add_library(optix_host
     context.cpp
     pipeline.cpp
     geometry.cpp
+    triangle_geometry.cpp
+    tlas_builder.cpp
     sbt.cpp
     neural_params.cpp
     optix_stubs.cpp

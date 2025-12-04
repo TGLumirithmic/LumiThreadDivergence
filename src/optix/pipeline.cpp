@@ -28,9 +28,13 @@ Pipeline::~Pipeline() {
     if (raygen_group_) optixProgramGroupDestroy(raygen_group_);
     if (miss_group_) optixProgramGroupDestroy(miss_group_);
     if (neural_hit_group_) optixProgramGroupDestroy(neural_hit_group_);
+    if (triangle_hit_group_) optixProgramGroupDestroy(triangle_hit_group_);
+    if (triangle_shadow_group_) optixProgramGroupDestroy(triangle_shadow_group_);
+    if (neural_shadow_group_) optixProgramGroupDestroy(neural_shadow_group_);
     if (raygen_module_) optixModuleDestroy(raygen_module_);
     if (miss_module_) optixModuleDestroy(miss_module_);
     if (neural_module_) optixModuleDestroy(neural_module_);
+    if (triangle_module_) optixModuleDestroy(triangle_module_);
 }
 
 std::string Pipeline::load_ptx_file(const std::string& filename) {
@@ -77,9 +81,9 @@ bool Pipeline::build(const std::string& ptx_dir) {
 
     // Initialize pipeline compile options (used by all modules)
     pipeline_compile_options_.usesMotionBlur = false;
-    pipeline_compile_options_.traversableGraphFlags = OPTIX_TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_GAS;
+    pipeline_compile_options_.traversableGraphFlags = OPTIX_TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_LEVEL_INSTANCING;
     pipeline_compile_options_.numPayloadValues = 17;  // color (float3) + position_normalized (float3) + direction (float3) + position_unnormalized (float3) + neural_cache (5: visibility, normal.xyz, depth)
-    pipeline_compile_options_.numAttributeValues = 2; // t, primitive_id for custom primitives
+    pipeline_compile_options_.numAttributeValues = 3; // For triangles: 3 attributes (geometric normal), for custom: t, primitive_id
     pipeline_compile_options_.exceptionFlags = OPTIX_EXCEPTION_FLAG_NONE;
     pipeline_compile_options_.pipelineLaunchParamsVariableName = "params";
 
@@ -87,8 +91,9 @@ bool Pipeline::build(const std::string& ptx_dir) {
     std::string raygen_ptx = load_ptx_file(ptx_dir + "/raygen.ptx");
     std::string miss_ptx = load_ptx_file(ptx_dir + "/miss.ptx");
     std::string neural_ptx = load_ptx_file(ptx_dir + "/neural.ptx");
+    std::string triangle_ptx = load_ptx_file(ptx_dir + "/triangle.ptx");
 
-    if (raygen_ptx.empty() || miss_ptx.empty() || neural_ptx.empty()) {
+    if (raygen_ptx.empty() || miss_ptx.empty() || neural_ptx.empty() || triangle_ptx.empty()) {
         std::cerr << "Failed to load one or more PTX files" << std::endl;
         return false;
     }
@@ -97,6 +102,7 @@ bool Pipeline::build(const std::string& ptx_dir) {
     raygen_module_ = create_module(raygen_ptx);
     miss_module_ = create_module(miss_ptx);
     neural_module_ = create_module(neural_ptx);
+    triangle_module_ = create_module(triangle_ptx);
 
     // Create program groups
     OptixProgramGroupOptions program_group_options = {};
@@ -172,15 +178,89 @@ bool Pipeline::build(const std::string& ptx_dir) {
         }
     }
 
+    // Triangle hit group (closest hit only, built-in intersection)
+    {
+        OptixProgramGroupDesc desc = {};
+        desc.kind = OPTIX_PROGRAM_GROUP_KIND_HITGROUP;
+        desc.hitgroup.moduleCH = triangle_module_;
+        desc.hitgroup.entryFunctionNameCH = "__closesthit__triangle";
+
+        char log[2048];
+        size_t log_size = sizeof(log);
+        OPTIX_CHECK(optixProgramGroupCreate(
+            context_.get(),
+            &desc,
+            1,
+            &program_group_options,
+            log,
+            &log_size,
+            &triangle_hit_group_));
+
+        if (log_size > 1) {
+            std::cout << "Triangle hit group log:\n" << log << std::endl;
+        }
+    }
+
+    // Triangle shadow hit group (any-hit only for shadow rays)
+    {
+        OptixProgramGroupDesc desc = {};
+        desc.kind = OPTIX_PROGRAM_GROUP_KIND_HITGROUP;
+        desc.hitgroup.moduleAH = triangle_module_;
+        desc.hitgroup.entryFunctionNameAH = "__anyhit__triangle_shadow";
+
+        char log[2048];
+        size_t log_size = sizeof(log);
+        OPTIX_CHECK(optixProgramGroupCreate(
+            context_.get(),
+            &desc,
+            1,
+            &program_group_options,
+            log,
+            &log_size,
+            &triangle_shadow_group_));
+
+        if (log_size > 1) {
+            std::cout << "Triangle shadow hit group log:\n" << log << std::endl;
+        }
+    }
+
+    // Neural shadow hit group (intersection + any-hit for shadow rays)
+    {
+        OptixProgramGroupDesc desc = {};
+        desc.kind = OPTIX_PROGRAM_GROUP_KIND_HITGROUP;
+        desc.hitgroup.moduleIS = neural_module_;
+        desc.hitgroup.entryFunctionNameIS = "__intersection__neural";
+        desc.hitgroup.moduleAH = neural_module_;
+        desc.hitgroup.entryFunctionNameAH = "__anyhit__neural_shadow";
+
+        char log[2048];
+        size_t log_size = sizeof(log);
+        OPTIX_CHECK(optixProgramGroupCreate(
+            context_.get(),
+            &desc,
+            1,
+            &program_group_options,
+            log,
+            &log_size,
+            &neural_shadow_group_));
+
+        if (log_size > 1) {
+            std::cout << "Neural shadow hit group log:\n" << log << std::endl;
+        }
+    }
+
     // Link pipeline
     OptixProgramGroup program_groups[] = {
         raygen_group_,
         miss_group_,
-        neural_hit_group_
+        neural_hit_group_,
+        triangle_hit_group_,
+        triangle_shadow_group_,
+        neural_shadow_group_
     };
 
     OptixPipelineLinkOptions pipeline_link_options = {};
-    pipeline_link_options.maxTraceDepth = 1;  // Must be 1 for single GAS traversal
+    pipeline_link_options.maxTraceDepth = 2;  // Primary ray + shadow ray
 
     char log[2048];
     size_t log_size = sizeof(log);
@@ -204,7 +284,7 @@ bool Pipeline::build(const std::string& ptx_dir) {
         OPTIX_CHECK(optixUtilAccumulateStackSizes(prog_group, &stack_sizes, pipeline_));
     }
 
-    uint32_t max_trace_depth = 1;  // Must be 1 for single GAS traversal
+    uint32_t max_trace_depth = 2;  // Primary ray + shadow ray
     uint32_t max_cc_depth = 0;
     uint32_t max_dc_depth = 0;
     uint32_t direct_callable_stack_size_from_traversal;
@@ -225,7 +305,7 @@ bool Pipeline::build(const std::string& ptx_dir) {
         direct_callable_stack_size_from_traversal,
         direct_callable_stack_size_from_state,
         continuation_stack_size,
-        1));  // Must be 1 for single GAS traversal
+        2));  // Primary ray + shadow ray
 
     std::cout << "OptiX pipeline created successfully" << std::endl;
     return true;

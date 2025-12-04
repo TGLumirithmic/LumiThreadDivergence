@@ -23,11 +23,15 @@ public:
     OptixModule get_raygen_module() const { return raygen_module_; }
     OptixModule get_miss_module() const { return miss_module_; }
     OptixModule get_neural_module() const { return neural_module_; }
+    OptixModule get_triangle_module() const { return triangle_module_; }
 
     // Get program group handles
     OptixProgramGroup get_raygen_group() const { return raygen_group_; }
     OptixProgramGroup get_miss_group() const { return miss_group_; }
     OptixProgramGroup get_neural_hit_group() const { return neural_hit_group_; }
+    OptixProgramGroup get_triangle_hit_group() const { return triangle_hit_group_; }
+    OptixProgramGroup get_triangle_shadow_group() const { return triangle_shadow_group_; }
+    OptixProgramGroup get_neural_shadow_group() const { return neural_shadow_group_; }
 
 private:
     Context& context_;
@@ -37,11 +41,15 @@ private:
     OptixModule raygen_module_ = nullptr;
     OptixModule miss_module_ = nullptr;
     OptixModule neural_module_ = nullptr;
+    OptixModule triangle_module_ = nullptr;
 
     // Program groups
     OptixProgramGroup raygen_group_ = nullptr;
     OptixProgramGroup miss_group_ = nullptr;
     OptixProgramGroup neural_hit_group_ = nullptr;
+    OptixProgramGroup triangle_hit_group_ = nullptr;
+    OptixProgramGroup triangle_shadow_group_ = nullptr;
+    OptixProgramGroup neural_shadow_group_ = nullptr;
 
     // Pipeline compile options (needed for pipeline creation)
     OptixPipelineCompileOptions pipeline_compile_options_ = {};

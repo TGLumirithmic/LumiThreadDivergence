@@ -140,4 +140,4 @@ target_link_libraries(renderer
 target_link_options(renderer PRIVATE "-Wl,--no-as-needed")
 
 # Make sure PTX files are compiled before building renderer
-add_dependencies(renderer raygen miss neural)
+add_dependencies(renderer raygen miss neural triangle)

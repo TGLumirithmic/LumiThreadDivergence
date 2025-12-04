@@ -7,6 +7,11 @@
 
 namespace optix {
 
+// Simple 3D vector structure (matches common.h)
+struct float3_aligned {
+    float x, y, z;
+};
+
 // Shader Binding Table record structures
 template <typename T>
 struct SbtRecord {
@@ -16,6 +21,12 @@ struct SbtRecord {
 
 // Empty data for raygen and miss (no per-record data needed yet)
 struct EmptyData {};
+
+// Material data for hit groups
+struct MaterialData {
+    float3_aligned albedo;
+    float roughness;  // For future use
+};
 
 // Shader Binding Table manager
 class ShaderBindingTable {

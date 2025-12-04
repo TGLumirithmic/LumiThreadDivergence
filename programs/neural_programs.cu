@@ -1,6 +1,7 @@
 #include <optix.h>
 #include <optix_device.h>
 #include "common.h"
+#include "lighting.cuh"
 
 extern "C" {
 __constant__ LaunchParams params;
@@ -15,14 +16,20 @@ static __forceinline__ __device__ float3 operator+(const float3& a, const float3
     return make_float3(a.x + b.x, a.y + b.y, a.z + b.z);
 }
 
+#ifndef DOT_DEFINED
+#define DOT_DEFINED
 static __forceinline__ __device__ float dot(const float3& a, const float3& b) {
     return a.x * b.x + a.y * b.y + a.z * b.z;
 }
+#endif
 
+#ifndef NORMALIZE_DEFINED
+#define NORMALIZE_DEFINED
 static __forceinline__ __device__ float3 normalize(const float3& v) {
     float inv_len = rsqrtf(dot(v, v));
     return make_float3(v.x * inv_len, v.y * inv_len, v.z * inv_len);
 }
+#endif
 
 // Simple ray-AABB intersection test
 static __forceinline__ __device__ bool intersect_aabb(
@@ -67,8 +74,9 @@ static __forceinline__ __device__ bool intersect_aabb(
 
 // Intersection program for neural asset AABB
 extern "C" __global__ void __intersection__neural() {
-    const float3 ray_orig = optixGetWorldRayOrigin();
-    const float3 ray_dir = optixGetWorldRayDirection();
+    // Use object-space rays (transformed by TLAS instance transform)
+    const float3 ray_orig = optixGetObjectRayOrigin();
+    const float3 ray_dir = optixGetObjectRayDirection();
 
     const float3 aabb_min = make_float3(
         params.neural_bounds.min.x,
@@ -220,4 +228,11 @@ extern "C" __global__ void __closesthit__neural() {
     optixSetPayload_9(__float_as_uint(hit_pos.x));
     optixSetPayload_10(__float_as_uint(hit_pos.y));
     optixSetPayload_11(__float_as_uint(hit_pos.z));
+}
+
+// Any-hit program for neural asset (for shadow rays)
+extern "C" __global__ void __anyhit__neural_shadow() {
+    // Shadow ray hit neural asset - mark as occluded
+    optixSetPayload_0(__float_as_uint(0.0f));  // Not visible
+    optixTerminateRay();
 }
