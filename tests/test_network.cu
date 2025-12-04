@@ -7,7 +7,7 @@
  * 3. Compares outputs with ground truth predictions (if available)
  * 4. Outputs a simple visualization
  */
-
+#include <iomanip>
 #include <iostream>
 #include <string>
 #include <cmath>
@@ -135,6 +135,12 @@ void test_intermediate_encodings(neural::NeuralNetwork& network,
         CUDA_SYNC_CHECK();
         cuda_utils::copy_to_host(h_hash_out.data(), d_hash_out, num_samples * 32);
 
+        // Per-level hash grid statistics
+        const int n_hash_levels = 16;
+        const int features_per_level = 2;
+        std::vector<double> per_level_hash_error(n_hash_levels, 0.0);
+        std::vector<double> per_level_max_error(n_hash_levels, 0.0);
+
         double total_hash_error = 0.0;
         double max_hash_error = 0.0;
         std::cout << "\nHash Encoding Comparison (first 3 samples):" << std::endl;
@@ -155,12 +161,28 @@ void test_intermediate_encodings(neural::NeuralNetwork& network,
                 double error = std::abs(gt - pred);
                 total_hash_error += error;
                 max_hash_error = std::max(max_hash_error, error);
+
+                // Track per-level statistics
+                int level = j / features_per_level;
+                per_level_hash_error[level] += error;
+                per_level_max_error[level] = std::max(per_level_max_error[level], error);
             }
         }
 
         std::cout << "\nHash Encoding Results:" << std::endl;
-        std::cout << "  Mean L1 error: " << (total_hash_error / (num_samples * 32)) << std::endl;
-        std::cout << "  Max error: " << max_hash_error << std::endl;
+        std::cout << "  Overall Mean L1 error: " << (total_hash_error / (num_samples * 32)) << std::endl;
+        std::cout << "  Overall Max error: " << max_hash_error << std::endl;
+
+        std::cout << "\n  Per-Level Statistics:" << std::endl;
+        std::cout << "  Level | Mean Error | Max Error" << std::endl;
+        std::cout << "  ------|------------|----------" << std::endl;
+        for (int level = 0; level < n_hash_levels; ++level) {
+            double mean_error = per_level_hash_error[level] / (num_samples * features_per_level);
+            std::cout << "  " << std::setw(5) << level
+                      << " | " << std::setw(10) << std::fixed << std::setprecision(6) << mean_error
+                      << " | " << std::setw(9) << std::fixed << std::setprecision(6) << per_level_max_error[level]
+                      << std::endl;
+        }
 
         // Test direction encoding
         network.encode_direction(d_directions, d_dir_out, num_samples);
@@ -444,7 +466,7 @@ void test_simple_grid(neural::NeuralNetwork& network,
 
     // Write visualization images
     std::cout << "Writing visualization images..." << std::endl;
-    write_ppm(output_dir + "/visibility.ppm", visibility_threshold.data(), width, height, 1);
+    write_ppm(output_dir + "/visibility.ppm", visibility.data(), width, height, 1);
     write_ppm(output_dir + "/normals.ppm", normals_vis.data(), width, height, 3);
     write_ppm(output_dir + "/depth.ppm", depth.data(), width, height, 1);
 

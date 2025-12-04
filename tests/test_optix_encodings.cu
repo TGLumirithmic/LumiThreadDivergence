@@ -6,6 +6,7 @@
  */
 
 #include <iostream>
+#include <iomanip>
 #include <string>
 #include <cmath>
 #include <vector>
@@ -66,7 +67,7 @@ __global__ void print_weights_kernel(const MLPParams dir_encoder) {
 
         float output[16];
         float scratch[128];
-        mlp_forward(test_input, dir_encoder, output, scratch);
+        mlp_forward_fp16(test_input, dir_encoder, output, scratch);
 
         printf("Output (first 4):\n");
         for (int i = 0; i < 4; ++i) {
@@ -101,14 +102,14 @@ __global__ void test_direction_encoding_kernel(
 
     float direction_encoding[16];
     float scratch[128];
-    mlp_forward(direction_input, dir_encoder, direction_encoding, scratch);
+    mlp_forward_fp16(direction_input, dir_encoder, direction_encoding, scratch);
 
     for (int i = 0; i < 16; ++i) {
         dir_out[idx * 16 + i] = direction_encoding[i];
     }
 }
 
-// Kernel to test visibility decoder
+// Kernel to test visibility decoder using OptiX encoders
 __global__ void test_visibility_decoder_kernel(
     const float* positions,
     const float* directions,
@@ -146,8 +147,8 @@ __global__ void test_visibility_decoder_kernel(
         direction_input[i] = 1.0f;
     }
     float direction_encoding[16];
-    float dir_scratch[128];
-    mlp_forward(direction_input, dir_encoder, direction_encoding, dir_scratch);
+    float dir_scratch[256];
+    mlp_forward_fp16(direction_input, dir_encoder, direction_encoding, dir_scratch);
 
     // Concatenate encodings (32 + 16 = 48)
     float concatenated[48];
@@ -158,31 +159,104 @@ __global__ void test_visibility_decoder_kernel(
         concatenated[32 + i] = direction_encoding[i];
     }
 
-    // Debug: print first sample's concatenated input
-    if (idx == 0) {
-        printf("\n[Vis Decoder Debug] Sample 0 concatenated input (first 8 values):\n");
-        for (int i = 0; i < 8; ++i) {
-            printf("  concat[%d] = %f\n", i, concatenated[i]);
-        }
-        printf("[Vis Decoder Debug] Output activation: %s\n", vis_decoder.output_activation);
-        printf("[Vis Decoder Debug] Number of layers: %u\n", vis_decoder.n_layers);
-    }
-
-    // Run visibility decoder
+    // Run visibility decoder with fp16
     float vis_output[16];  // Output is padded to 16
-    float vis_scratch[128];
-    mlp_forward(concatenated, vis_decoder, vis_output, vis_scratch);
-
-    // Debug: print first sample's output
-    if (idx == 0) {
-        printf("\n[Vis Decoder Debug] Sample 0 output (first 4 values):\n");
-        for (int i = 0; i < 4; ++i) {
-            printf("  vis_output[%d] = %f\n", i, vis_output[i]);
-        }
-    }
+    float vis_scratch[256];
+    mlp_forward_fp16(concatenated, vis_decoder, vis_output, vis_scratch);
 
     // First element is the visibility logit
     visibility_out[idx] = vis_output[0];
+}
+
+// Kernel to test visibility decoder using ground truth encodings
+__global__ void test_visibility_decoder_with_gt_encodings_kernel(
+    const float* gt_hash_encodings,
+    const float* gt_dir_encodings,
+    const MLPParams vis_decoder,
+    float* visibility_out,
+    int batch_size
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= batch_size) return;
+
+    // Use ground truth encodings directly
+    float concatenated[48];
+    for (int i = 0; i < 32; ++i) {
+        concatenated[i] = gt_hash_encodings[idx * 32 + i];
+    }
+    for (int i = 0; i < 16; ++i) {
+        concatenated[32 + i] = gt_dir_encodings[idx * 16 + i];
+    }
+
+    // Run visibility decoder with fp16
+    float vis_output[16];
+    float vis_scratch[256];
+    mlp_forward_fp16(concatenated, vis_decoder, vis_output, vis_scratch);
+
+    for (int i = 0; i < 16; ++i) {
+        // First element is the visibility logit
+        visibility_out[idx*16 + i] = vis_output[i];
+    }
+}
+
+// Kernel to test visibility decoder using GT hash + predicted direction
+__global__ void test_visibility_decoder_with_gt_hash_pred_dir_kernel(
+    const float* gt_hash_encodings,
+    const float* pred_dir_encodings,
+    const MLPParams vis_decoder,
+    float* visibility_out,
+    int batch_size
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= batch_size) return;
+
+    // Use GT hash + predicted direction encodings
+    float concatenated[48];
+    for (int i = 0; i < 32; ++i) {
+        concatenated[i] = gt_hash_encodings[idx * 32 + i];
+    }
+    for (int i = 0; i < 16; ++i) {
+        concatenated[32 + i] = pred_dir_encodings[idx * 16 + i];
+    }
+
+    // Run visibility decoder with fp16
+    float vis_output[16];
+    float vis_scratch[256];
+    mlp_forward_fp16(concatenated, vis_decoder, vis_output, vis_scratch);
+
+    for (int i = 0; i < 16; ++i) {
+        visibility_out[idx*16 + i] = vis_output[i];
+    }
+}
+
+// Kernel to test visibility decoder using predicted hash + GT direction
+__global__ void test_visibility_decoder_with_pred_hash_gt_dir_kernel(
+    const float* pred_hash_encodings,
+    const float* gt_dir_encodings,
+    const MLPParams vis_decoder,
+    float* visibility_out,
+    int batch_size
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= batch_size) return;
+
+    // Use predicted hash + GT direction encodings
+    float concatenated[48];
+    for (int i = 0; i < 32; ++i) {
+        concatenated[i] = pred_hash_encodings[idx * 32 + i];
+    }
+    for (int i = 0; i < 16; ++i) {
+        concatenated[32 + i] = gt_dir_encodings[idx * 16 + i];
+    }
+
+    // Run visibility decoder with fp16
+    float vis_output[16];
+    float vis_scratch[256];
+    mlp_forward_fp16(concatenated, vis_decoder, vis_output, vis_scratch);
+
+    for (int i = 0; i < 16; ++i) {
+        visibility_out[idx*16 + i] = vis_output[i];
+    }
 }
 
 int main(int argc, char** argv) {
@@ -209,6 +283,7 @@ int main(int argc, char** argv) {
 
         // Convert to OptiX format
         neural::NetworkConfig config = neural::NetworkConfig::instant_ngp_default();
+        config.visibility_decoder.output_activation = "None";
         optix::NeuralNetworkParamsHost neural_params(config);
         if (!neural_params.load_from_weights(loader)) {
             std::cerr << "Failed to convert weights" << std::endl;
@@ -230,199 +305,325 @@ int main(int argc, char** argv) {
             return 1;
         }
 
-        // Test a small batch
-        int test_batch = 10;
+        // Load all samples
         auto samples = reader.read_all();
-        std::cout << "\nTesting first " << test_batch << " samples" << std::endl;
+        const int total_samples = samples.size();
+        const int batch_size = 4096;  // Process in batches for efficiency
+        std::cout << "\nTesting all " << total_samples << " samples in batches of " << batch_size << std::endl;
 
-        // Prepare inputs
-        std::vector<float> h_positions(test_batch * 3);
-        std::vector<float> h_directions(test_batch * 3);
+        // Allocate device memory for batch processing
+        float* d_positions = cuda_utils::allocate_device<float>(batch_size * 3);
+        float* d_directions = cuda_utils::allocate_device<float>(batch_size * 3);
+        float* d_hash_out = cuda_utils::allocate_device<float>(batch_size * 32);
+        float* d_dir_out = cuda_utils::allocate_device<float>(batch_size * 16);
+        float* d_visibility_out = cuda_utils::allocate_device<float>(batch_size);
+        float* d_visibility_gt_enc_out = cuda_utils::allocate_device<float>(batch_size*16);
+        float* d_visibility_gt_hash_pred_dir_out = cuda_utils::allocate_device<float>(batch_size*16);
+        float* d_visibility_pred_hash_gt_dir_out = cuda_utils::allocate_device<float>(batch_size*16);
+        float* d_gt_hash_encodings = cuda_utils::allocate_device<float>(batch_size * 32);
+        float* d_gt_dir_encodings = cuda_utils::allocate_device<float>(batch_size * 16);
 
-        for (int i = 0; i < test_batch; ++i) {
-            h_positions[i * 3 + 0] = (samples[i].origin[0] + 1.0f) / 2.0f;
-            h_positions[i * 3 + 1] = (samples[i].origin[1] + 1.0f) / 2.0f;
-            h_positions[i * 3 + 2] = (samples[i].origin[2] + 1.0f) / 2.0f;
+        // Host buffers for batch processing
+        std::vector<float> h_positions(batch_size * 3);
+        std::vector<float> h_directions(batch_size * 3);
+        std::vector<float> h_hash_out(batch_size * 32);
+        std::vector<float> h_dir_out(batch_size * 16);
+        std::vector<float> h_visibility_out(batch_size);
+        std::vector<float> h_visibility_gt_enc_out(batch_size*16);
+        std::vector<float> h_visibility_gt_hash_pred_dir_out(batch_size*16);
+        std::vector<float> h_visibility_pred_hash_gt_dir_out(batch_size*16);
+        std::vector<float> h_gt_hash_encodings(batch_size * 32);
+        std::vector<float> h_gt_dir_encodings(batch_size * 16);
 
-            h_directions[i * 3 + 0] = samples[i].direction[0];
-            h_directions[i * 3 + 1] = samples[i].direction[1];
-            h_directions[i * 3 + 2] = samples[i].direction[2];
-        }
+        // Aggregate statistics
+        const int n_hash_levels = 16;
+        const int features_per_level = 2;
 
-        // Allocate device memory
-        float* d_positions = cuda_utils::allocate_device<float>(test_batch * 3);
-        float* d_directions = cuda_utils::allocate_device<float>(test_batch * 3);
-        float* d_hash_out = cuda_utils::allocate_device<float>(test_batch * 32);
-        float* d_dir_out = cuda_utils::allocate_device<float>(test_batch * 16);
-
-        cuda_utils::copy_to_device(d_positions, h_positions.data(), test_batch * 3);
-        cuda_utils::copy_to_device(d_directions, h_directions.data(), test_batch * 3);
-
-        // Checkpoint 1: Print first 10 direction encoder weights from device
-        std::cout << "\n=== Checkpoint 1: Direction Encoder Weights (from device pointer) ===" << std::endl;
-        const auto& dir_params = neural_params.get_device_params().direction_encoder;
-
-        // Copy the MLPLayer structure back from device to get the weight pointer
-        MLPLayer h_layer0;
-        CUDA_CHECK(cudaMemcpy(&h_layer0, dir_params.layers, sizeof(MLPLayer), cudaMemcpyDeviceToHost));
-        std::cout << "Layer 0: in_dim=" << h_layer0.in_dim << ", out_dim=" << h_layer0.out_dim << std::endl;
-        debug_utils::print_buffer_values(h_layer0.weights, 10, "Dir Encoder Layer 0 Weights (from device)");
-
-        // Test hash encoding
-        std::cout << "\n=== Testing Hash Encoding ===" << std::endl;
-        int threads = 256;
-        int blocks = (test_batch + threads - 1) / threads;
-
-        test_hash_encoding_kernel<<<blocks, threads>>>(
-            d_positions,
-            neural_params.get_device_params().hash_encoding,
-            d_hash_out,
-            test_batch
-        );
-        CUDA_SYNC_CHECK();
-
-        std::vector<float> h_hash_out(test_batch * 32);
-        cuda_utils::copy_to_host(h_hash_out.data(), d_hash_out, test_batch * 32);
-
-        // Compare with ground truth
         double total_hash_error = 0.0;
-        double max_hash_error = 0.0;
-
-        for (int i = 0; i < test_batch; ++i) {
-            std::cout << "\nSample " << i << ":" << std::endl;
-            std::cout << "  Position: (" << h_positions[i*3] << ", " << h_positions[i*3+1] << ", " << h_positions[i*3+2] << ")" << std::endl;
-
-            double sample_error = 0.0;
-            for (int j = 0; j < 32; ++j) {
-                float gt = samples[i].hash_grid[j];
-                float pred = h_hash_out[i * 32 + j];
-                double error = std::abs(gt - pred);
-                sample_error += error;
-                total_hash_error += error;
-                max_hash_error = std::max(max_hash_error, error);
-
-                if (j < 32) {  // Print first 4 features
-                    std::cout << "    [" << j << "] GT: " << gt << ", Pred: " << pred << ", Error: " << error << std::endl;
-                }
-            }
-            std::cout << "  Mean error: " << (sample_error / 32.0) << std::endl;
-        }
-
-        std::cout << "\nHash Encoding Results:" << std::endl;
-        std::cout << "  Total mean L1 error: " << (total_hash_error / (test_batch * 32)) << std::endl;
-        std::cout << "  Max error: " << max_hash_error << std::endl;
-
-        // Test direction encoding
-        std::cout << "\n=== Testing Direction Encoding ===" << std::endl;
-
-        // Launch kernel to print weights as seen from device
-        print_weights_kernel<<<1, 1>>>(neural_params.get_device_params().direction_encoder);
-        CUDA_SYNC_CHECK();
-
-        test_direction_encoding_kernel<<<blocks, threads>>>(
-            d_directions,
-            neural_params.get_device_params().direction_encoder,
-            d_dir_out,
-            test_batch
-        );
-        CUDA_SYNC_CHECK();
-
-        std::vector<float> h_dir_out(test_batch * 16);
-        cuda_utils::copy_to_host(h_dir_out.data(), d_dir_out, test_batch * 16);
-
-        // Compare with ground truth
         double total_dir_error = 0.0;
+        double total_vis_error = 0.0;
+        double total_vis_gt_enc_error = 0.0;  // Visibility error with GT encodings
+        double total_vis_gt_hash_pred_dir_error = 0.0;  // Visibility error with GT hash + pred dir
+        double total_vis_pred_hash_gt_dir_error = 0.0;  // Visibility error with pred hash + GT dir
+        double max_hash_error = 0.0;
         double max_dir_error = 0.0;
+        double max_vis_error = 0.0;
+        double max_vis_gt_enc_error = 0.0;
+        double max_vis_gt_hash_pred_dir_error = 0.0;
+        double max_vis_pred_hash_gt_dir_error = 0.0;
+        int correct_predictions = 0;
+        int correct_predictions_gt_enc = 0;
+        int correct_predictions_gt_hash_pred_dir = 0;
+        int correct_predictions_pred_hash_gt_dir = 0;
 
-        for (int i = 0; i < test_batch; ++i) {
-            std::cout << "\nSample " << i << ":" << std::endl;
-            std::cout << "  Direction: (" << h_directions[i*3] << ", " << h_directions[i*3+1] << ", " << h_directions[i*3+2] << ")" << std::endl;
+        // Per-level hash grid statistics
+        std::vector<double> per_level_hash_error(n_hash_levels, 0.0);
+        std::vector<double> per_level_max_error(n_hash_levels, 0.0);
 
-            double sample_error = 0.0;
-            for (int j = 0; j < 16; ++j) {
-                float gt = samples[i].direction_encodings[j];
-                float pred = h_dir_out[i * 16 + j];
-                double error = std::abs(gt - pred);
-                sample_error += error;
-                total_dir_error += error;
-                max_dir_error = std::max(max_dir_error, error);
+        // Process all samples in batches
+        std::cout << "\n=== Processing All Samples ===" << std::endl;
+        const int threads = 256;
 
-                if (j < 4) {  // Print first 4 features
-                    std::cout << "    [" << j << "] GT: " << gt << ", Pred: " << pred << ", Error: " << error << std::endl;
+        for (int batch_start = 0; batch_start < total_samples; batch_start += batch_size) {
+            int current_batch_size = std::min(batch_size, total_samples - batch_start);
+            int blocks = (current_batch_size + threads - 1) / threads;
+
+            // Prepare batch inputs
+            for (int i = 0; i < current_batch_size; ++i) {
+                int sample_idx = batch_start + i;
+                h_positions[i * 3 + 0] = (samples[sample_idx].origin[0] + 1.0f) / 2.0f;
+                h_positions[i * 3 + 1] = (samples[sample_idx].origin[1] + 1.0f) / 2.0f;
+                h_positions[i * 3 + 2] = (samples[sample_idx].origin[2] + 1.0f) / 2.0f;
+
+                h_directions[i * 3 + 0] = samples[sample_idx].direction[0];
+                h_directions[i * 3 + 1] = samples[sample_idx].direction[1];
+                h_directions[i * 3 + 2] = samples[sample_idx].direction[2];
+
+                // Prepare ground truth encodings
+                for (int j = 0; j < 32; ++j) {
+                    h_gt_hash_encodings[i * 32 + j] = samples[sample_idx].hash_grid[j];
+                }
+                for (int j = 0; j < 16; ++j) {
+                    h_gt_dir_encodings[i * 16 + j] = samples[sample_idx].direction_encodings[j];
                 }
             }
-            std::cout << "  Mean error: " << (sample_error / 16.0) << std::endl;
+
+            // Copy to device
+            cuda_utils::copy_to_device(d_positions, h_positions.data(), current_batch_size * 3);
+            cuda_utils::copy_to_device(d_directions, h_directions.data(), current_batch_size * 3);
+            cuda_utils::copy_to_device(d_gt_hash_encodings, h_gt_hash_encodings.data(), current_batch_size * 32);
+            cuda_utils::copy_to_device(d_gt_dir_encodings, h_gt_dir_encodings.data(), current_batch_size * 16);
+
+            // Test hash encoding
+            test_hash_encoding_kernel<<<blocks, threads>>>(
+                d_positions,
+                neural_params.get_device_params().hash_encoding,
+                d_hash_out,
+                current_batch_size
+            );
+            CUDA_SYNC_CHECK();
+
+            // Test direction encoding
+            test_direction_encoding_kernel<<<blocks, threads>>>(
+                d_directions,
+                neural_params.get_device_params().direction_encoder,
+                d_dir_out,
+                current_batch_size
+            );
+            CUDA_SYNC_CHECK();
+
+            // Test visibility decoder with OptiX encoders
+            test_visibility_decoder_kernel<<<blocks, threads>>>(
+                d_positions,
+                d_directions,
+                neural_params.get_device_params().hash_encoding,
+                neural_params.get_device_params().direction_encoder,
+                neural_params.get_device_params().visibility_decoder,
+                d_visibility_out,
+                current_batch_size
+            );
+            CUDA_SYNC_CHECK();
+
+            // Test visibility decoder with ground truth encodings
+            test_visibility_decoder_with_gt_encodings_kernel<<<blocks, threads>>>(
+                d_gt_hash_encodings,
+                d_gt_dir_encodings,
+                neural_params.get_device_params().visibility_decoder,
+                d_visibility_gt_enc_out,
+                current_batch_size
+            );
+            CUDA_SYNC_CHECK();
+
+            // Test visibility decoder with GT hash + predicted direction
+            test_visibility_decoder_with_gt_hash_pred_dir_kernel<<<blocks, threads>>>(
+                d_gt_hash_encodings,
+                d_dir_out,
+                neural_params.get_device_params().visibility_decoder,
+                d_visibility_gt_hash_pred_dir_out,
+                current_batch_size
+            );
+            CUDA_SYNC_CHECK();
+
+            // Test visibility decoder with predicted hash + GT direction
+            test_visibility_decoder_with_pred_hash_gt_dir_kernel<<<blocks, threads>>>(
+                d_hash_out,
+                d_gt_dir_encodings,
+                neural_params.get_device_params().visibility_decoder,
+                d_visibility_pred_hash_gt_dir_out,
+                current_batch_size
+            );
+            CUDA_SYNC_CHECK();
+
+            // Copy results back
+            cuda_utils::copy_to_host(h_hash_out.data(), d_hash_out, current_batch_size * 32);
+            cuda_utils::copy_to_host(h_dir_out.data(), d_dir_out, current_batch_size * 16);
+            cuda_utils::copy_to_host(h_visibility_out.data(), d_visibility_out, current_batch_size);
+            cuda_utils::copy_to_host(h_visibility_gt_enc_out.data(), d_visibility_gt_enc_out, current_batch_size*16);
+            cuda_utils::copy_to_host(h_visibility_gt_hash_pred_dir_out.data(), d_visibility_gt_hash_pred_dir_out, current_batch_size*16);
+            cuda_utils::copy_to_host(h_visibility_pred_hash_gt_dir_out.data(), d_visibility_pred_hash_gt_dir_out, current_batch_size*16);
+
+            // Aggregate statistics for this batch
+            for (int i = 0; i < current_batch_size; ++i) {
+                int sample_idx = batch_start + i;
+
+                // Hash encoding errors (per-level tracking)
+                for (int j = 0; j < 32; ++j) {
+                    // float gt = samples[sample_idx].hash_grid[j];
+                    float gt = h_gt_hash_encodings[i * 32 + j];
+                    float pred = h_hash_out[i * 32 + j];
+                    double error = std::abs(gt - pred);
+                    total_hash_error += error;
+                    max_hash_error = std::max(max_hash_error, error);
+
+                    // Track per-level statistics
+                    int level = j / features_per_level;
+                    per_level_hash_error[level] += error;
+                    per_level_max_error[level] = std::max(per_level_max_error[level], error);
+                }
+
+                // Direction encoding errors
+                for (int j = 0; j < 16; ++j) {
+                    float gt = h_gt_dir_encodings[i * 16 + j];
+                    float pred = h_dir_out[i * 16 + j];
+                    double error = std::abs(gt - pred);
+                    total_dir_error += error;
+                    max_dir_error = std::max(max_dir_error, error);
+                }
+
+                // Visibility errors and accuracy (with OptiX encoders)
+                // Note: Network now outputs raw logits (not probabilities)
+                float gt_logit = samples[sample_idx].visibility_logit;
+                float pred_logit = h_visibility_out[i];  // Direct logit output
+
+                // Convert logits to probabilities for accuracy check
+                float gt_prob = 1.0f / (1.0f + std::exp(-gt_logit));
+                float pred_prob = 1.0f / (1.0f + std::exp(-pred_logit));
+
+                bool gt_visible = gt_logit >= 0.0f;  // Threshold logit at 0 (equivalent to prob >= 0.5)
+                bool pred_visible = pred_logit >= 0.0f;
+                if (gt_visible == pred_visible) {
+                    correct_predictions++;
+                }
+
+                double error = std::abs(gt_logit - pred_logit);
+                total_vis_error += error;
+                max_vis_error = std::max(max_vis_error, error);
+
+                // Visibility errors and accuracy (with GT encodings)
+                float pred_gt_enc_logit = h_visibility_gt_enc_out[i*16];  // Direct logit output
+
+                // if (i == 0) {
+                //     std::cout << "Full vis output" << std::endl;
+                //     std::cout << "GT vis " << gt_logit << std::endl;
+                //     for (int j = 0; j < 16; ++j)
+                //     {
+                //         std::cout << "    Prediction at dim " << j << ": " << h_visibility_gt_enc_out[i*16 + j] << std::endl;
+                //     }
+                // }
+
+                bool pred_gt_enc_visible = pred_gt_enc_logit >= 0.0f;
+                if (gt_visible == pred_gt_enc_visible) {
+                    correct_predictions_gt_enc++;
+                }
+
+                double error_gt_enc = std::abs(gt_logit - pred_gt_enc_logit);
+                total_vis_gt_enc_error += error_gt_enc;
+                max_vis_gt_enc_error = std::max(max_vis_gt_enc_error, error_gt_enc);
+
+                // Visibility errors and accuracy (with GT hash + predicted direction)
+                float pred_gt_hash_pred_dir_logit = h_visibility_gt_hash_pred_dir_out[i*16];  // Direct logit output
+                bool pred_gt_hash_pred_dir_visible = pred_gt_hash_pred_dir_logit >= 0.0f;
+                if (gt_visible == pred_gt_hash_pred_dir_visible) {
+                    correct_predictions_gt_hash_pred_dir++;
+                }
+
+                double error_gt_hash_pred_dir = std::abs(gt_logit - pred_gt_hash_pred_dir_logit);
+                total_vis_gt_hash_pred_dir_error += error_gt_hash_pred_dir;
+                max_vis_gt_hash_pred_dir_error = std::max(max_vis_gt_hash_pred_dir_error, error_gt_hash_pred_dir);
+
+                // Visibility errors and accuracy (with predicted hash + GT direction)
+                float pred_pred_hash_gt_dir_logit = h_visibility_pred_hash_gt_dir_out[i*16];  // Direct logit output
+                bool pred_pred_hash_gt_dir_visible = pred_pred_hash_gt_dir_logit >= 0.0f;
+                if (gt_visible == pred_pred_hash_gt_dir_visible) {
+                    correct_predictions_pred_hash_gt_dir++;
+                }
+
+                double error_pred_hash_gt_dir = std::abs(gt_logit - pred_pred_hash_gt_dir_logit);
+                total_vis_pred_hash_gt_dir_error += error_pred_hash_gt_dir;
+                max_vis_pred_hash_gt_dir_error = std::max(max_vis_pred_hash_gt_dir_error, error_pred_hash_gt_dir);
+            }
+
+            // Progress indicator
+            if ((batch_start + current_batch_size) % 10000 == 0 || batch_start + current_batch_size == total_samples) {
+                std::cout << "  Processed " << (batch_start + current_batch_size) << "/" << total_samples << " samples\r" << std::flush;
+            }
+        }
+        std::cout << std::endl;
+
+        // Print aggregate results
+        std::cout << "\n=== Hash Encoding Results (All Samples) ===" << std::endl;
+        std::cout << "  Overall Mean L1 error: " << (total_hash_error / (total_samples * 32)) << std::endl;
+        std::cout << "  Overall Max error: " << max_hash_error << std::endl;
+
+        std::cout << "\n  Per-Level Statistics:" << std::endl;
+        std::cout << "  Level | Mean Error | Max Error" << std::endl;
+        std::cout << "  ------|------------|----------" << std::endl;
+        for (int level = 0; level < n_hash_levels; ++level) {
+            double mean_error = per_level_hash_error[level] / (total_samples * features_per_level);
+            std::cout << "  " << std::setw(5) << level
+                      << " | " << std::setw(10) << std::fixed << std::setprecision(6) << mean_error
+                      << " | " << std::setw(9) << std::fixed << std::setprecision(6) << per_level_max_error[level]
+                      << std::endl;
         }
 
-        std::cout << "\nDirection Encoding Results:" << std::endl;
-        std::cout << "  Total mean L1 error: " << (total_dir_error / (test_batch * 16)) << std::endl;
+        std::cout << "\n=== Direction Encoding Results (All Samples) ===" << std::endl;
+        std::cout << "  Mean L1 error: " << (total_dir_error / (total_samples * 16)) << std::endl;
         std::cout << "  Max error: " << max_dir_error << std::endl;
 
-        // Test visibility decoder
-        std::cout << "\n=== Testing Visibility Decoder ===" << std::endl;
-
-        float* d_visibility_out = cuda_utils::allocate_device<float>(test_batch);
-
-        test_visibility_decoder_kernel<<<blocks, threads>>>(
-            d_positions,
-            d_directions,
-            neural_params.get_device_params().hash_encoding,
-            neural_params.get_device_params().direction_encoder,
-            neural_params.get_device_params().visibility_decoder,
-            d_visibility_out,
-            test_batch
-        );
-        CUDA_SYNC_CHECK();
-
-        std::vector<float> h_visibility_out(test_batch);
-        cuda_utils::copy_to_host(h_visibility_out.data(), d_visibility_out, test_batch);
-
-        // Compare with ground truth
-        double total_vis_error = 0.0;
-        double max_vis_error = 0.0;
-        int correct_predictions = 0;
-
-        for (int i = 0; i < test_batch; ++i) {
-            float gt_logit = samples[i].visibility_logit;
-            float pred_prob = h_visibility_out[i];  // This is a probability (after sigmoid)
-
-            // Convert prediction probability back to logit for comparison
-            // logit = log(prob / (1 - prob))
-            float pred_logit;
-            if (pred_prob <= 0.0f) {
-                pred_logit = -100.0f;  // Very negative logit
-            } else if (pred_prob >= 1.0f) {
-                pred_logit = 100.0f;  // Very positive logit
-            } else {
-                pred_logit = std::log(pred_prob / (1.0f - pred_prob));
-            }
-
-            // Convert GT logit to probability
-            float gt_prob = 1.0f / (1.0f + std::exp(-gt_logit));
-
-            // Check if prediction is correct (threshold at 0.5)
-            bool gt_visible = gt_prob >= 0.5f;
-            bool pred_visible = pred_prob >= 0.5f;
-            if (gt_visible == pred_visible) {
-                correct_predictions++;
-            }
-
-            double error = std::abs(gt_logit - pred_logit);
-            total_vis_error += error;
-            max_vis_error = std::max(max_vis_error, error);
-
-            std::cout << "\nSample " << i << ":" << std::endl;
-            std::cout << "  GT logit: " << gt_logit << " (prob: " << gt_prob << ")" << std::endl;
-            std::cout << "  Pred prob: " << pred_prob << " (logit: " << pred_logit << ")" << std::endl;
-            std::cout << "  Error: " << error << std::endl;
-            std::cout << "  Correct: " << (gt_visible == pred_visible ? "yes" : "no") << std::endl;
-        }
-
-        std::cout << "\nVisibility Decoder Results:" << std::endl;
-        std::cout << "  Mean L1 error (logits): " << (total_vis_error / test_batch) << std::endl;
+        std::cout << "\n=== Visibility Decoder Results (with OptiX Encoders) ===" << std::endl;
+        std::cout << "  Mean L1 error (logits): " << (total_vis_error / total_samples) << std::endl;
         std::cout << "  Max error: " << max_vis_error << std::endl;
-        std::cout << "  Accuracy: " << (100.0 * correct_predictions / test_batch) << "% ("
-                  << correct_predictions << "/" << test_batch << ")" << std::endl;
+        std::cout << "  Accuracy: " << (100.0 * correct_predictions / total_samples) << "% ("
+                  << correct_predictions << "/" << total_samples << ")" << std::endl;
+
+        std::cout << "\n=== Visibility Decoder Results (with Ground Truth Encodings) ===" << std::endl;
+        std::cout << "  Mean L1 error (logits): " << (total_vis_gt_enc_error / total_samples) << std::endl;
+        std::cout << "  Max error: " << max_vis_gt_enc_error << std::endl;
+        std::cout << "  Accuracy: " << (100.0 * correct_predictions_gt_enc / total_samples) << "% ("
+                  << correct_predictions_gt_enc << "/" << total_samples << ")" << std::endl;
+
+        std::cout << "\n=== Visibility Decoder Results (with GT Hash + Predicted Direction) ===" << std::endl;
+        std::cout << "  Mean L1 error (logits): " << (total_vis_gt_hash_pred_dir_error / total_samples) << std::endl;
+        std::cout << "  Max error: " << max_vis_gt_hash_pred_dir_error << std::endl;
+        std::cout << "  Accuracy: " << (100.0 * correct_predictions_gt_hash_pred_dir / total_samples) << "% ("
+                  << correct_predictions_gt_hash_pred_dir << "/" << total_samples << ")" << std::endl;
+
+        std::cout << "\n=== Visibility Decoder Results (with Predicted Hash + GT Direction) ===" << std::endl;
+        std::cout << "  Mean L1 error (logits): " << (total_vis_pred_hash_gt_dir_error / total_samples) << std::endl;
+        std::cout << "  Max error: " << max_vis_pred_hash_gt_dir_error << std::endl;
+        std::cout << "  Accuracy: " << (100.0 * correct_predictions_pred_hash_gt_dir / total_samples) << "% ("
+                  << correct_predictions_pred_hash_gt_dir << "/" << total_samples << ")" << std::endl;
+
+        std::cout << "\n=== Error Contribution Analysis ===" << std::endl;
+        std::cout << "  Total encoder error contribution: "
+                  << (total_vis_error - total_vis_gt_enc_error) / total_samples << std::endl;
+        std::cout << "  Hash encoder error contribution: "
+                  << (total_vis_pred_hash_gt_dir_error - total_vis_gt_enc_error) / total_samples << std::endl;
+        std::cout << "  Direction encoder error contribution: "
+                  << (total_vis_gt_hash_pred_dir_error - total_vis_gt_enc_error) / total_samples << std::endl;
+        std::cout << "  Decoder-only error: " << (total_vis_gt_enc_error / total_samples) << std::endl;
+        std::cout << "\n  Accuracy Comparison:" << std::endl;
+        std::cout << "    Both predicted encoders: " << (100.0 * correct_predictions / total_samples) << "%" << std::endl;
+        std::cout << "    GT hash + pred direction: " << (100.0 * correct_predictions_gt_hash_pred_dir / total_samples) << "%" << std::endl;
+        std::cout << "    Pred hash + GT direction: " << (100.0 * correct_predictions_pred_hash_gt_dir / total_samples) << "%" << std::endl;
+        std::cout << "    Both GT encoders: " << (100.0 * correct_predictions_gt_enc / total_samples) << "%" << std::endl;
+        std::cout << "\n  Accuracy Gains from Perfect Encodings:" << std::endl;
+        std::cout << "    Perfect hash (vs both predicted): "
+                  << ((correct_predictions_gt_hash_pred_dir - correct_predictions) * 100.0 / total_samples) << "%" << std::endl;
+        std::cout << "    Perfect direction (vs both predicted): "
+                  << ((correct_predictions_pred_hash_gt_dir - correct_predictions) * 100.0 / total_samples) << "%" << std::endl;
+        std::cout << "    Both perfect (vs both predicted): "
+                  << ((correct_predictions_gt_enc - correct_predictions) * 100.0 / total_samples) << "%" << std::endl;
 
         // Cleanup
         cuda_utils::free_device(d_positions);
@@ -430,6 +631,11 @@ int main(int argc, char** argv) {
         cuda_utils::free_device(d_hash_out);
         cuda_utils::free_device(d_dir_out);
         cuda_utils::free_device(d_visibility_out);
+        cuda_utils::free_device(d_visibility_gt_enc_out);
+        cuda_utils::free_device(d_visibility_gt_hash_pred_dir_out);
+        cuda_utils::free_device(d_visibility_pred_hash_gt_dir_out);
+        cuda_utils::free_device(d_gt_hash_encodings);
+        cuda_utils::free_device(d_gt_dir_encodings);
 
         std::cout << "\n=== Test Complete ===" << std::endl;
         return 0;

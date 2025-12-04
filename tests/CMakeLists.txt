@@ -65,3 +65,50 @@ set_target_properties(test_optix_encodings PROPERTIES
 )
 
 install(TARGETS test_optix_encodings DESTINATION bin)
+
+# OptiX encoding test program (tests intermediate encodings)
+add_executable(test_tcnn_ppm_input test_tcnn_ppm_input.cu)
+
+target_include_directories(test_tcnn_ppm_input PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/programs
+    ${OptiX_INCLUDE}
+)
+
+target_link_libraries(test_tcnn_ppm_input PRIVATE
+    neural_integration
+    CUDA::cudart
+    TCNN::tcnn
+)
+
+set_target_properties(test_tcnn_ppm_input PROPERTIES
+    CUDA_SEPARABLE_COMPILATION ON
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+)
+
+install(TARGETS test_tcnn_ppm_input DESTINATION bin)
+
+
+# OptiX encoding test program (tests intermediate encodings)
+add_executable(test_optix_ppm_input test_optix_ppm_input.cu)
+
+target_include_directories(test_optix_ppm_input PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/programs
+    ${OptiX_INCLUDE}
+)
+
+target_link_libraries(test_optix_ppm_input PRIVATE
+    neural_integration
+    CUDA::cudart
+    optix_host
+)
+
+set_target_properties(test_optix_ppm_input PROPERTIES
+    CUDA_SEPARABLE_COMPILATION ON
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+)
+
+install(TARGETS test_optix_ppm_input DESTINATION bin)

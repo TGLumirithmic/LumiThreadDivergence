@@ -176,7 +176,12 @@ bool NeuralNetworkParamsHost::load_from_weights(const neural::WeightLoader& load
 
     d_params_.visibility_decoder.layers = d_vis_decoder_layers_;
     d_params_.visibility_decoder.n_layers = vis_decoder_n_layers_;
-    d_params_.visibility_decoder.output_activation = d_sigmoid_str_;
+    if (config_.visibility_decoder.output_activation[0] == 'R' || config_.visibility_decoder.output_activation[0] == 'r')
+        d_params_.visibility_decoder.output_activation = d_relu_str_;
+    else if (config_.visibility_decoder.output_activation[0] == 'S' || config_.visibility_decoder.output_activation[0] == 's')
+        d_params_.visibility_decoder.output_activation = d_sigmoid_str_;
+    else
+        d_params_.visibility_decoder.output_activation = d_none_str_;
 
     d_params_.normal_decoder.layers = d_norm_decoder_layers_;
     d_params_.normal_decoder.n_layers = norm_decoder_n_layers_;
@@ -357,6 +362,7 @@ bool NeuralNetworkParamsHost::load_mlp(
         ));
         offset += weight_size;
     }
+    std::cout << "Output activation: " << output_activation << std::endl;
 
     std::cout << "  Used " << offset << " / " << params_tensor->data.size() << " parameters" << std::endl;
 

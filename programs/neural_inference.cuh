@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cuda_runtime.h>
+#include <cuda_fp16.h>
 #include "neural_types.h"
 
 // ============================================================================
@@ -11,8 +12,16 @@ __device__ __forceinline__ float relu(float x) {
     return fmaxf(0.0f, x);
 }
 
+__device__ __forceinline__ __half relu(__half x) {
+    return __hmax(__float2half(0.0f), x);
+}
+
 __device__ __forceinline__ float sigmoid(float x) {
     return 1.0f / (1.0f + expf(-x));
+}
+
+__device__ __forceinline__ __half sigmoid(__half x) {
+    return __float2half(1.0f) / (__float2half(1.0f) + hexp(__hneg(x)));
 }
 
 // ============================================================================
@@ -36,7 +45,7 @@ __device__ __forceinline__ uint32_t hash_grid_index(
     result ^= z * primes[2];
 
     // Modulo by hashmap size (power of 2, so we can use bitwise AND)
-    return result & (hashmap_size - 1);
+    return result;
 }
 
 // Hash grid encoding with trilinear interpolation
@@ -104,6 +113,8 @@ __device__ __forceinline__ void hash_encode(
                     );
                 }
 
+                hash_idx = hash_idx % hashmap_size;
+
                 // Lookup feature value from hash table (offset is in features, hash_idx is in grid points)
                 uint32_t table_idx = level_offset_features + hash_idx * params.n_features_per_level + f;
                 values[i] = params.hash_table[table_idx];
@@ -151,6 +162,26 @@ __device__ __forceinline__ void matmul_add_bias(
     }
 }
 
+// Half precision version of matmul
+__device__ __forceinline__ void matmul_add_bias_fp16(
+    const __half* input,
+    const __half* weights,
+    const __half* bias,
+    __half* output,
+    uint32_t in_dim,
+    uint32_t out_dim
+) {
+    const __half zero = __float2half(0.0f);
+    for (uint32_t i = 0; i < out_dim; ++i) {
+        __half sum = (bias != nullptr) ? bias[i] : zero;
+        for (uint32_t j = 0; j < in_dim; ++j) {
+            // Row-major indexing: weights[out_idx, in_idx] = weights[out_idx * in_dim + in_idx]
+            sum = __hadd(sum, __hmul(weights[i * in_dim + j], input[j]));
+        }
+        output[i] = sum;
+    }
+}
+
 // Apply activation function element-wise
 __device__ __forceinline__ void apply_activation(
     float* data,
@@ -159,6 +190,26 @@ __device__ __forceinline__ void apply_activation(
 ) {
     // Simple string comparison for activation type
     // In device code, we compare by checking first character
+    char act_type = activation[0];
+
+    if (act_type == 'r' || act_type == 'R') {  // ReLU
+        for (uint32_t i = 0; i < size; ++i) {
+            data[i] = relu(data[i]);
+        }
+    } else if (act_type == 's' || act_type == 'S') {  // Sigmoid
+        for (uint32_t i = 0; i < size; ++i) {
+            data[i] = sigmoid(data[i]);
+        }
+    }
+    // else: "none" or "None" - no activation
+}
+
+// Half precision version of apply_activation
+__device__ __forceinline__ void apply_activation_fp16(
+    __half* data,
+    uint32_t size,
+    const char* activation
+) {
     char act_type = activation[0];
 
     if (act_type == 'r' || act_type == 'R') {  // ReLU
@@ -223,6 +274,61 @@ __device__ __forceinline__ void mlp_forward(
     }
 }
 
+// Hybrid MLP forward pass: fp32 weights, fp16 computation
+// This matches tiny-cuda-nn's behavior more closely
+__device__ __forceinline__ void mlp_forward_fp16(
+    const float* input,
+    const MLPParams& params,
+    float* output,
+    float* scratch  // Will use as fp16 buffer
+) {
+    __half* fp16_scratch = reinterpret_cast<__half*>(scratch);
+
+    // Convert input to fp16
+    const MLPLayer& first_layer = params.layers[0];
+    __half* fp16_input = fp16_scratch;
+    for (uint32_t i = 0; i < first_layer.in_dim; ++i) {
+        fp16_input[i] = __float2half(input[i]);
+    }
+
+    __half* current_input_fp16 = fp16_input;
+    __half* layer_output_fp16 = fp16_scratch + first_layer.in_dim;
+
+    // Forward through all layers in fp16
+    for (uint32_t l = 0; l < params.n_layers; ++l) {
+        const MLPLayer& layer = params.layers[l];
+
+        // Convert weights to fp16 on the fly and compute
+        const __half zero = __float2half(0.0f);
+        for (uint32_t i = 0; i < layer.out_dim; ++i) {
+            __half sum = (layer.biases != nullptr) ? __float2half(layer.biases[i]) : zero;
+            for (uint32_t j = 0; j < layer.in_dim; ++j) {
+                __half w = __float2half(layer.weights[i * layer.in_dim + j]);
+                sum = __hadd(sum, __hmul(w, current_input_fp16[j]));
+            }
+            layer_output_fp16[i] = sum;
+        }
+
+        // Apply activation in fp16
+        if (l < params.n_layers-1) {
+            apply_activation_fp16(layer_output_fp16, layer.out_dim, "ReLU");
+        }
+        else {
+            apply_activation_fp16(layer_output_fp16, layer.out_dim, params.output_activation);
+        }
+
+        // Output becomes input for next layer
+        current_input_fp16 = layer_output_fp16;
+        layer_output_fp16 += layer.out_dim;
+    }
+
+    // Convert final output back to fp32
+    const MLPLayer& last_layer = params.layers[params.n_layers-1];
+    for (uint32_t i = 0; i < last_layer.out_dim; ++i) {
+        output[i] = __half2float(current_input_fp16[i]);
+    }
+}
+
 // ============================================================================
 // Complete Neural Network Inference
 // ============================================================================
@@ -284,7 +390,7 @@ __device__ __forceinline__ void neural_inference(
         concatenated[pos_encoding_dim + i] = direction_encoding[i];
     }
 
-    // Step 4: Run three decoders
+    // Step 4: Run three decoders with fp16 precision
     float* decoder_scratch = scratch + 288;  // Updated offset
 
     // Visibility decoder (48D -> 32D -> 32D -> 32D -> 1D with sigmoid)

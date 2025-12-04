@@ -22,9 +22,9 @@ __global__ void pad_direction_kernel_float(
         output[output_offset + i] = input[input_offset + i];
     }
 
-    // Pad remaining dimensions with zeros
+    // Pad remaining dimensions with ones (matching training)
     for (uint32_t i = input_dims; i < padded_dims; ++i) {
-        output[output_offset + i] = 0.0f;
+        output[output_offset + i] = 1.0f;
     }
 }
 
@@ -115,7 +115,7 @@ __global__ void convert_and_pad_direction_kernel(
         output[output_offset + i] = __float2half(input[input_offset + i]);
     }
 
-    // Pad remaining dimensions with zeros
+    // Pad remaining dimensions with ones (matching training)
     for (uint32_t i = input_dims; i < padded_dims; ++i) {
         output[output_offset + i] = __float2half(1.0f);
     }
