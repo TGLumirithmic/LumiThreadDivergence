@@ -35,8 +35,11 @@ struct NeuralAssetBounds {
 
 // Launch parameters - shared between host and device
 struct LaunchParams {
-    // Output buffer
+    // Output buffers
     uchar4* frame_buffer;
+    uchar4* position_buffer;              // For hit_pos_normalized (quantized)
+    uchar4* direction_buffer;             // For normalized_dir (quantized)
+    float3_aligned* unnormalized_position_buffer; // For hit_pos (world space, full precision)
     uint32_t width;
     uint32_t height;
 

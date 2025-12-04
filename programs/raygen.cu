@@ -71,11 +71,23 @@ extern "C" __global__ void __raygen__rg() {
 
     // Trace ray
     float3 payload_color = make_float3(0.0f, 0.0f, 0.0f);
+    float3 payload_hit_pos_normalized = make_float3(0.0f, 0.0f, 0.0f);
+    float3 payload_dir = make_float3(0.0f, 0.0f, 0.0f);
+    float3 payload_hit_pos_unnormalized = make_float3(0.0f, 0.0f, 0.0f);
 
-    unsigned int p0, p1, p2;
+    unsigned int p0, p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11;
     p0 = __float_as_uint(payload_color.x);
     p1 = __float_as_uint(payload_color.y);
     p2 = __float_as_uint(payload_color.z);
+    p3 = __float_as_uint(payload_hit_pos_normalized.x);
+    p4 = __float_as_uint(payload_hit_pos_normalized.y);
+    p5 = __float_as_uint(payload_hit_pos_normalized.z);
+    p6 = __float_as_uint(payload_dir.x);
+    p7 = __float_as_uint(payload_dir.y);
+    p8 = __float_as_uint(payload_dir.z);
+    p9 = __float_as_uint(payload_hit_pos_unnormalized.x);
+    p10 = __float_as_uint(payload_hit_pos_unnormalized.y);
+    p11 = __float_as_uint(payload_hit_pos_unnormalized.z);
 
     optixTrace(
         params.traversable,
@@ -89,12 +101,21 @@ extern "C" __global__ void __raygen__rg() {
         0,                   // SBT offset
         1,                   // SBT stride
         0,                   // missSBTIndex
-        p0, p1, p2);
+        p0, p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11);
 
     // Retrieve color from payload
     payload_color.x = __uint_as_float(p0);
     payload_color.y = __uint_as_float(p1);
     payload_color.z = __uint_as_float(p2);
+    payload_hit_pos_normalized.x = __uint_as_float(p3);
+    payload_hit_pos_normalized.y = __uint_as_float(p4);
+    payload_hit_pos_normalized.z = __uint_as_float(p5);
+    payload_dir.x = __uint_as_float(p6);
+    payload_dir.y = __uint_as_float(p7);
+    payload_dir.z = __uint_as_float(p8);
+    payload_hit_pos_unnormalized.x = __uint_as_float(p9);
+    payload_hit_pos_unnormalized.y = __uint_as_float(p10);
+    payload_hit_pos_unnormalized.z = __uint_as_float(p11);
 
     // Convert to 8-bit color and write to frame buffer
     const uint32_t pixel_idx = y * params.width + x;
@@ -104,4 +125,23 @@ extern "C" __global__ void __raygen__rg() {
         (unsigned char)(fminf(payload_color.z, 1.0f) * 255.0f),
         255
     );
+
+    // Write hit position normalized (already normalized to [0,1])
+    params.position_buffer[pixel_idx] = make_uchar4(
+        (unsigned char)(fminf(fmaxf(payload_hit_pos_normalized.x, 0.0f), 1.0f) * 255.0f),
+        (unsigned char)(fminf(fmaxf(payload_hit_pos_normalized.y, 0.0f), 1.0f) * 255.0f),
+        (unsigned char)(fminf(fmaxf(payload_hit_pos_normalized.z, 0.0f), 1.0f) * 255.0f),
+        255
+    );
+
+    // Write direction (scale from [-1,1] to [0,1] for visualization)
+    params.direction_buffer[pixel_idx] = make_uchar4(
+        (unsigned char)(fminf(fmaxf(payload_dir.x * 0.5f + 0.5f, 0.0f), 1.0f) * 255.0f),
+        (unsigned char)(fminf(fmaxf(payload_dir.y * 0.5f + 0.5f, 0.0f), 1.0f) * 255.0f),
+        (unsigned char)(fminf(fmaxf(payload_dir.z * 0.5f + 0.5f, 0.0f), 1.0f) * 255.0f),
+        255
+    );
+
+    // Write unnormalized hit position (full precision, world space)
+    params.unnormalized_position_buffer[pixel_idx] = make_float3_aligned(payload_hit_pos_unnormalized);
 }

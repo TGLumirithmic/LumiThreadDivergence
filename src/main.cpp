@@ -36,6 +36,9 @@ struct NeuralAssetBounds {
 // Launch parameters - must exactly match programs/common.h
 struct LaunchParams {
     uchar4* frame_buffer;
+    uchar4* position_buffer;
+    uchar4* direction_buffer;
+    float3_aligned* unnormalized_position_buffer;
     uint32_t width;
     uint32_t height;
     Camera camera;
@@ -146,13 +149,22 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    // Allocate frame buffer
+    // Allocate frame buffers
     uchar4* d_frame_buffer = nullptr;
+    uchar4* d_position_buffer = nullptr;
+    uchar4* d_direction_buffer = nullptr;
+    float3_aligned* d_unnormalized_position_buffer = nullptr;
     CUDA_CHECK(cudaMalloc(&d_frame_buffer, width * height * sizeof(uchar4)));
+    CUDA_CHECK(cudaMalloc(&d_position_buffer, width * height * sizeof(uchar4)));
+    CUDA_CHECK(cudaMalloc(&d_direction_buffer, width * height * sizeof(uchar4)));
+    CUDA_CHECK(cudaMalloc(&d_unnormalized_position_buffer, width * height * sizeof(float3_aligned)));
 
     // Set up launch parameters
     LaunchParams launch_params = {};
     launch_params.frame_buffer = d_frame_buffer;
+    launch_params.position_buffer = d_position_buffer;
+    launch_params.direction_buffer = d_direction_buffer;
+    launch_params.unnormalized_position_buffer = d_unnormalized_position_buffer;
     launch_params.width = width;
     launch_params.height = height;
     launch_params.traversable = traversable;
@@ -163,7 +175,7 @@ int main(int argc, char** argv) {
     // Set up camera (looking at the cube from a distance)
     float camera_distance = 3.0f;
     launch_params.camera.position = {0.0f, 0.0f, camera_distance};
-    launch_params.camera.fov = 45.0f;
+    launch_params.camera.fov = 90.0f;
 
     // Camera basis vectors (standard OpenGL-style camera)
     float aspect = (float)width / (float)height;
@@ -213,19 +225,75 @@ int main(int argc, char** argv) {
     CUDA_CHECK(cudaStreamSynchronize(context.get_stream()));
     std::cout << "Rendering complete!" << std::endl;
 
-    // Download frame buffer
+    // Download frame buffers
     std::vector<uchar4> h_frame_buffer(width * height);
+    std::vector<uchar4> h_position_buffer(width * height);
+    std::vector<uchar4> h_direction_buffer(width * height);
+    std::vector<float3_aligned> h_unnormalized_position_buffer(width * height);
+
     CUDA_CHECK(cudaMemcpy(
         h_frame_buffer.data(),
         d_frame_buffer,
         width * height * sizeof(uchar4),
         cudaMemcpyDeviceToHost));
 
-    // Write output image
+    CUDA_CHECK(cudaMemcpy(
+        h_position_buffer.data(),
+        d_position_buffer,
+        width * height * sizeof(uchar4),
+        cudaMemcpyDeviceToHost));
+
+    CUDA_CHECK(cudaMemcpy(
+        h_direction_buffer.data(),
+        d_direction_buffer,
+        width * height * sizeof(uchar4),
+        cudaMemcpyDeviceToHost));
+
+    CUDA_CHECK(cudaMemcpy(
+        h_unnormalized_position_buffer.data(),
+        d_unnormalized_position_buffer,
+        width * height * sizeof(float3_aligned),
+        cudaMemcpyDeviceToHost));
+
+    // Write output images
     write_ppm(output_file, h_frame_buffer.data(), width, height);
+
+    // Generate filenames for position and direction
+    std::string pos_file = output_file;
+    std::string dir_file = output_file;
+    size_t dot_pos = pos_file.find_last_of('.');
+    if (dot_pos != std::string::npos) {
+        pos_file = pos_file.substr(0, dot_pos) + "_position.ppm";
+        dir_file = dir_file.substr(0, dot_pos) + "_direction.ppm";
+    } else {
+        pos_file += "_position.ppm";
+        dir_file += "_direction.ppm";
+    }
+
+    write_ppm(pos_file, h_position_buffer.data(), width, height);
+    write_ppm(dir_file, h_direction_buffer.data(), width, height);
+
+    // Write unnormalized positions as binary file for analysis
+    std::string unnorm_file = output_file;
+    if (dot_pos != std::string::npos) {
+        unnorm_file = unnorm_file.substr(0, dot_pos) + "_position_unnormalized.bin";
+    } else {
+        unnorm_file += "_position_unnormalized.bin";
+    }
+
+    std::ofstream bin_file(unnorm_file, std::ios::binary);
+    if (bin_file.is_open()) {
+        bin_file.write(reinterpret_cast<const char*>(h_unnormalized_position_buffer.data()),
+                       width * height * sizeof(float3_aligned));
+        bin_file.close();
+        std::cout << "Wrote unnormalized positions to: " << unnorm_file << std::endl;
+    }
 
     // Cleanup
     cudaFree(d_frame_buffer);
+    cudaFree(d_position_buffer);
+    cudaFree(d_direction_buffer);
+    cudaFree(d_unnormalized_position_buffer);
     cudaFree(d_launch_params);
 
     std::cout << "\n=== Rendering Complete ===" << std::endl;

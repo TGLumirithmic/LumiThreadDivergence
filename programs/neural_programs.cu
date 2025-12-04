@@ -171,4 +171,19 @@ extern "C" __global__ void __closesthit__neural() {
     optixSetPayload_0(__float_as_uint(color.x));
     optixSetPayload_1(__float_as_uint(color.y));
     optixSetPayload_2(__float_as_uint(color.z));
+
+    // Set hit position (normalized to [0,1]^3)
+    optixSetPayload_3(__float_as_uint(normalized_pos.x));
+    optixSetPayload_4(__float_as_uint(normalized_pos.y));
+    optixSetPayload_5(__float_as_uint(normalized_pos.z));
+
+    // Set direction (normalized to [-1,1]^3)
+    optixSetPayload_6(__float_as_uint(normalized_dir.x));
+    optixSetPayload_7(__float_as_uint(normalized_dir.y));
+    optixSetPayload_8(__float_as_uint(normalized_dir.z));
+
+    // Set unnormalized hit position (world space)
+    optixSetPayload_9(__float_as_uint(hit_pos.x));
+    optixSetPayload_10(__float_as_uint(hit_pos.y));
+    optixSetPayload_11(__float_as_uint(hit_pos.z));
 }
