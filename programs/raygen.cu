@@ -75,7 +75,7 @@ extern "C" __global__ void __raygen__rg() {
     float3 payload_dir = make_float3(0.0f, 0.0f, 0.0f);
     float3 payload_hit_pos_unnormalized = make_float3(0.0f, 0.0f, 0.0f);
 
-    unsigned int p0, p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11;
+    unsigned int p0, p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11, p12, p13, p14, p15, p16;
     p0 = __float_as_uint(payload_color.x);
     p1 = __float_as_uint(payload_color.y);
     p2 = __float_as_uint(payload_color.z);
@@ -88,6 +88,7 @@ extern "C" __global__ void __raygen__rg() {
     p9 = __float_as_uint(payload_hit_pos_unnormalized.x);
     p10 = __float_as_uint(payload_hit_pos_unnormalized.y);
     p11 = __float_as_uint(payload_hit_pos_unnormalized.z);
+    p12 = p13 = p14 = p15 = p16 = 0;  // Neural inference cache slots
 
     optixTrace(
         params.traversable,
@@ -101,7 +102,7 @@ extern "C" __global__ void __raygen__rg() {
         0,                   // SBT offset
         1,                   // SBT stride
         0,                   // missSBTIndex
-        p0, p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11);
+        p0, p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11, p12, p13, p14, p15, p16);
 
     // Retrieve color from payload
     payload_color.x = __uint_as_float(p0);

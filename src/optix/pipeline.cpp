@@ -78,7 +78,7 @@ bool Pipeline::build(const std::string& ptx_dir) {
     // Initialize pipeline compile options (used by all modules)
     pipeline_compile_options_.usesMotionBlur = false;
     pipeline_compile_options_.traversableGraphFlags = OPTIX_TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_GAS;
-    pipeline_compile_options_.numPayloadValues = 12;  // color (float3) + position_normalized (float3) + direction (float3) + position_unnormalized (float3)
+    pipeline_compile_options_.numPayloadValues = 17;  // color (float3) + position_normalized (float3) + direction (float3) + position_unnormalized (float3) + neural_cache (5: visibility, normal.xyz, depth)
     pipeline_compile_options_.numAttributeValues = 2; // t, primitive_id for custom primitives
     pipeline_compile_options_.exceptionFlags = OPTIX_EXCEPTION_FLAG_NONE;
     pipeline_compile_options_.pipelineLaunchParamsVariableName = "params";

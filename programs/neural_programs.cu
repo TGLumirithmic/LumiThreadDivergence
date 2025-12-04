@@ -84,19 +84,59 @@ extern "C" __global__ void __intersection__neural() {
 
     float t_near, t_far;
     if (intersect_aabb(ray_orig, ray_dir, aabb_min, aabb_max, t_near, t_far)) {
-        // Report intersection at near point
-        // Attributes: t and primitive_id (not used for now)
-        optixReportIntersection(
-            t_near,
-            0,  // hit kind
-            __float_as_uint(t_near),  // attribute 0
-            0                          // attribute 1
+        // Compute hit position at near intersection
+        const float3 hit_pos = ray_orig + t_near * ray_dir;
+
+        // Normalize position to [0, 1]^3 (neural network input space)
+        const float3 normalized_pos = make_float3(
+            (hit_pos.x - params.neural_bounds.min.x) /
+                (params.neural_bounds.max.x - params.neural_bounds.min.x),
+            (hit_pos.y - params.neural_bounds.min.y) /
+                (params.neural_bounds.max.y - params.neural_bounds.min.y),
+            (hit_pos.z - params.neural_bounds.min.z) /
+                (params.neural_bounds.max.z - params.neural_bounds.min.z)
         );
+
+        // Normalize ray direction
+        const float3 normalized_dir = normalize(ray_dir);
+
+        // Run neural network inference
+        float visibility;
+        float3 predicted_normal;
+        float depth;
+
+        neural_inference(
+            normalized_pos,
+            normalized_dir,
+            params.neural_network,
+            visibility,
+            predicted_normal,
+            depth
+        );
+
+        // Early rejection: only report intersection if visible
+        if (visibility >= 0.5f) {
+            // Cache neural inference results in payload for closest-hit
+            optixSetPayload_12(__float_as_uint(visibility));
+            optixSetPayload_13(__float_as_uint(predicted_normal.x));
+            optixSetPayload_14(__float_as_uint(predicted_normal.y));
+            optixSetPayload_15(__float_as_uint(predicted_normal.z));
+            optixSetPayload_16(__float_as_uint(depth));
+
+            // Report intersection at near point
+            optixReportIntersection(
+                t_near,
+                0,  // hit kind
+                __float_as_uint(t_near),  // attribute 0
+                0                          // attribute 1
+            );
+        }
+        // If visibility < 0.5, don't report intersection (early rejection)
     }
 }
 
 // Closest-hit program for neural asset
-// Calls custom neural network inference
+// Reads cached neural network inference results from payload
 extern "C" __global__ void __closesthit__neural() {
     // Get ray information
     const float3 ray_orig = optixGetWorldRayOrigin();
@@ -119,19 +159,13 @@ extern "C" __global__ void __closesthit__neural() {
     // Normalize ray direction (should already be normalized, but ensure)
     const float3 normalized_dir = normalize(ray_dir);
 
-    // Run neural network inference
-    float visibility;
+    // Read cached neural inference results from payload (computed in intersection program)
+    const float visibility = __uint_as_float(optixGetPayload_12());
     float3 predicted_normal;
-    float depth;
-
-    neural_inference(
-        normalized_pos,
-        normalized_dir,
-        params.neural_network,
-        visibility,
-        predicted_normal,
-        depth
-    );
+    predicted_normal.x = __uint_as_float(optixGetPayload_13());
+    predicted_normal.y = __uint_as_float(optixGetPayload_14());
+    predicted_normal.z = __uint_as_float(optixGetPayload_15());
+    const float depth = __uint_as_float(optixGetPayload_16());
 
     // Compute final color using network outputs
     // For now: simple shading with predicted normal
