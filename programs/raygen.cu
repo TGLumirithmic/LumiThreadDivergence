@@ -1,6 +1,7 @@
 #include <optix.h>
 #include <optix_device.h>
 #include "common.h"
+#include "divergence_profiling.cuh"
 
 extern "C" {
 __constant__ LaunchParams params;
@@ -90,6 +91,15 @@ extern "C" __global__ void __raygen__rg() {
     p11 = __float_as_uint(payload_hit_pos_unnormalized.z);
     p12 = p13 = p14 = p15 = p16 = 0;  // Neural inference cache slots
 
+    // Divergence profiling payload registers (p17-p23)
+    unsigned int p17 = 0, p18 = 0, p19 = 0, p20 = 0, p21 = 0, p22 = 0, p23 = 0;
+
+    // Geometry type marker (p24): 0=miss, 1=triangle, 2=neural
+    unsigned int p24 = 0;
+
+    // BLAS traversal: instance_id (-1 for miss, 0+ for hit)
+    unsigned int p25 = __float_as_uint(-1.0f);
+
     optixTrace(
         params.traversable,
         camera_pos,
@@ -102,7 +112,25 @@ extern "C" __global__ void __raygen__rg() {
         0,                   // SBT offset
         1,                   // SBT stride
         0,                   // missSBTIndex
-        p0, p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11, p12, p13, p14, p15, p16);
+        p0, p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11, p12, p13, p14, p15, p16,
+        p17, p18, p19, p20, p21, p22, p23, p24, p25);  // Divergence counters + geometry type + instance_id
+
+    // Measure program-type divergence: neural vs triangle/miss
+    // When rays in the same warp hit different geometry types, this measures the divergence
+    p19 += measure_divergence(p24 == 2);  // true=neural, false=triangle/miss
+
+    // Measure BLAS traversal divergence
+    int instance_id = __float_as_int(__uint_as_float(p25));  // -1 for miss, 0+ for hit
+
+    // 1. Hit/Miss divergence - proxy for early BVH exit behavior
+    unsigned maskHit = __ballot_sync(__activemask(), instance_id >= 0);
+    unsigned numHit = __popc(maskHit);
+    unsigned numMiss = 32 - numHit;
+    unsigned div_hit_miss = min(numHit, numMiss);
+
+    // 2. Instance entropy - measures spatial coherence across instances
+    float entropy = warpInstanceEntropy(instance_id);
+    unsigned div_instance_entropy = (unsigned)(entropy * 1000.0f);  // Fixed-point encoding
 
     // Retrieve color from payload
     payload_color.x = __uint_as_float(p0);
@@ -145,4 +173,19 @@ extern "C" __global__ void __raygen__rg() {
 
     // Write unnormalized hit position (full precision, world space)
     params.unnormalized_position_buffer[pixel_idx] = make_float3_aligned(payload_hit_pos_unnormalized);
+
+    // Write divergence profiling metrics
+    if (params.divergence_buffer != nullptr) {
+        const uint32_t base_idx = pixel_idx * NUM_DIVERGENCE_METRICS;
+
+        params.divergence_buffer[base_idx + DIVERGENCE_RAYGEN] = p17;
+        params.divergence_buffer[base_idx + DIVERGENCE_INTERSECTION] = p18;
+        params.divergence_buffer[base_idx + DIVERGENCE_CLOSESTHIT] = p19;
+        params.divergence_buffer[base_idx + DIVERGENCE_SHADOW] = p20;
+        params.divergence_buffer[base_idx + DIVERGENCE_HASH_ENCODING] = p21;
+        params.divergence_buffer[base_idx + DIVERGENCE_MLP_FORWARD] = p22;
+        params.divergence_buffer[base_idx + DIVERGENCE_EARLY_REJECT] = p23;
+        params.divergence_buffer[base_idx + DIVERGENCE_HIT_MISS] = div_hit_miss;
+        params.divergence_buffer[base_idx + DIVERGENCE_INSTANCE_ENTROPY] = div_instance_entropy;
+    }
 }

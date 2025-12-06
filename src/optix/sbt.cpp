@@ -2,6 +2,7 @@
 #include "utils/error.h"
 #include <iostream>
 #include <cstring>
+#include <vector>
 
 #define OPTIX_CHECK(call)                                                      \
     do {                                                                       \
@@ -44,7 +45,7 @@ void ShaderBindingTable::create_sbt_record(
         cudaMemcpyHostToDevice));
 }
 
-bool ShaderBindingTable::build() {
+bool ShaderBindingTable::build(const std::vector<InstanceMetadata>& instances) {
     std::cout << "Building Shader Binding Table" << std::endl;
 
     EmptyData empty_data = {};
@@ -67,40 +68,58 @@ bool ShaderBindingTable::build() {
     CUDA_CALL(cudaMalloc(&d_miss_record_, 2 * sizeof(MissRecord)));
     CUDA_CALL(cudaMemcpy(d_miss_record_, miss_records, 2 * sizeof(MissRecord), cudaMemcpyHostToDevice));
 
-    // Create hitgroup records (4: triangle primary, triangle shadow, neural primary, neural shadow)
+    // Create hitgroup records for each instance
+    const size_t num_instances = instances.size();
     typedef SbtRecord<MaterialData> HitgroupRecord;
-    HitgroupRecord hitgroup_records[4];
+    std::vector<HitgroupRecord> hitgroup_records(num_instances * 2);
 
-    // Record 0: Triangle primary hit
-    MaterialData triangle_material;
-    triangle_material.albedo = {0.8f, 0.8f, 0.8f};
-    triangle_material.roughness = 0.5f;
-    OPTIX_CHECK(optixSbtRecordPackHeader(pipeline_.get_triangle_hit_group(), &hitgroup_records[0]));
-    hitgroup_records[0].data = triangle_material;
+    for (size_t i = 0; i < num_instances; ++i) {
+        const auto& inst = instances[i];
+        MaterialData mat = {};
 
-    // Record 1: Triangle shadow hit
-    MaterialData triangle_shadow_material;
-    triangle_shadow_material.albedo = {0.0f, 0.0f, 0.0f};
-    triangle_shadow_material.roughness = 0.0f;
-    OPTIX_CHECK(optixSbtRecordPackHeader(pipeline_.get_triangle_shadow_group(), &hitgroup_records[1]));
-    hitgroup_records[1].data = triangle_shadow_material;
+        if (inst.type == GeometryType::TRIANGLE_MESH) {
+            // Triangle mesh instance
+            mat.albedo = inst.albedo;
+            mat.roughness = inst.roughness;
+            mat.neural_params = nullptr;
 
-    // Record 2: Neural primary hit
-    MaterialData neural_material;
-    neural_material.albedo = {1.0f, 1.0f, 1.0f};
-    neural_material.roughness = 0.0f;
-    OPTIX_CHECK(optixSbtRecordPackHeader(pipeline_.get_neural_hit_group(), &hitgroup_records[2]));
-    hitgroup_records[2].data = neural_material;
+            // Set vertex/index buffer pointers
+            mat.vertex_buffer = (Vertex*)inst.vertex_buffer;
+            mat.index_buffer = (uint3*)inst.index_buffer;
 
-    // Record 3: Neural shadow hit
-    MaterialData neural_shadow_material;
-    neural_shadow_material.albedo = {0.0f, 0.0f, 0.0f};
-    neural_shadow_material.roughness = 0.0f;
-    OPTIX_CHECK(optixSbtRecordPackHeader(pipeline_.get_neural_shadow_group(), &hitgroup_records[3]));
-    hitgroup_records[3].data = neural_shadow_material;
+            // Use appropriate program group based on sbt_offset
+            OptixProgramGroup pg = (inst.sbt_offset == 0) ?
+                pipeline_.get_triangle_hit_group() :
+                pipeline_.get_triangle_shadow_group();
+            OPTIX_CHECK(optixSbtRecordPackHeader(pipeline_.get_triangle_hit_group(), &hitgroup_records[i*2]));
+            OPTIX_CHECK(optixSbtRecordPackHeader(pipeline_.get_triangle_shadow_group(), &hitgroup_records[i*2+1]));
 
-    CUDA_CALL(cudaMalloc(&d_hitgroup_record_, 4 * sizeof(HitgroupRecord)));
-    CUDA_CALL(cudaMemcpy(d_hitgroup_record_, hitgroup_records, 4 * sizeof(HitgroupRecord), cudaMemcpyHostToDevice));
+        } else {
+            std::cout << "Creating neural asset entry in SBT" << std::endl;
+            // Neural asset instance
+            mat.albedo = inst.albedo;
+            mat.roughness = inst.roughness;
+            mat.neural_params = inst.neural_params_device;
+
+            // nullptr for neural assets (no triangle mesh buffers)
+            mat.vertex_buffer = nullptr;
+            mat.index_buffer = nullptr;
+
+            // Use appropriate program group based on sbt_offset
+            // OptixProgramGroup pg = (inst.sbt_offset == 2) ?
+            //     pipeline_.get_neural_hit_group() :
+                // OptixProgramGroup pg = pipeline_.get_neural_hit_group();
+
+                // OptixProgramGroup pg = pipeline_.get_neural_shadow_group();
+            OPTIX_CHECK(optixSbtRecordPackHeader(pipeline_.get_neural_hit_group(), &hitgroup_records[i*2]));
+            OPTIX_CHECK(optixSbtRecordPackHeader(pipeline_.get_neural_shadow_group(), &hitgroup_records[i*2+1]));
+
+        }
+        hitgroup_records[i].data = mat;
+    }
+
+    CUDA_CALL(cudaMalloc(&d_hitgroup_record_, num_instances * 2 * sizeof(HitgroupRecord)));
+    CUDA_CALL(cudaMemcpy(d_hitgroup_record_, hitgroup_records.data(), num_instances * 2 * sizeof(HitgroupRecord), cudaMemcpyHostToDevice));
 
     // Fill in SBT structure
     sbt_.raygenRecord = (CUdeviceptr)d_raygen_record_;
@@ -111,7 +130,7 @@ bool ShaderBindingTable::build() {
 
     sbt_.hitgroupRecordBase = (CUdeviceptr)d_hitgroup_record_;
     sbt_.hitgroupRecordStrideInBytes = sizeof(HitgroupRecord);
-    sbt_.hitgroupRecordCount = 4;
+    sbt_.hitgroupRecordCount = num_instances*2;
 
     std::cout << "Shader Binding Table built successfully" << std::endl;
     std::cout << "  - Miss records: " << sbt_.missRecordCount << std::endl;

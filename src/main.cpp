@@ -2,6 +2,13 @@
 #include <fstream>
 #include <vector>
 #include <cmath>
+#include <sstream>
+#include <string>
+#include <algorithm>
+#include <cctype>
+
+#include <yaml-cpp/yaml.h>
+#include <tiny_obj_loader.h>
 
 #include <optix.h>
 #include <cuda_runtime.h>
@@ -16,6 +23,18 @@
 #include "neural/weight_loader.h"
 #include "neural/config.h"
 #include "utils/error.h"
+
+// Divergence metric indices (must match programs/common.h)
+#define DIVERGENCE_RAYGEN 0
+#define DIVERGENCE_INTERSECTION 1
+#define DIVERGENCE_CLOSESTHIT 2
+#define DIVERGENCE_SHADOW 3
+#define DIVERGENCE_HASH_ENCODING 4
+#define DIVERGENCE_MLP_FORWARD 5
+#define DIVERGENCE_EARLY_REJECT 6
+#define DIVERGENCE_HIT_MISS 7
+#define DIVERGENCE_INSTANCE_ENTROPY 8
+#define NUM_DIVERGENCE_METRICS 9
 
 // Simple 3D vector structure (matches common.h)
 struct float3_aligned {
@@ -52,11 +71,132 @@ struct LaunchParams {
     uint32_t height;
     Camera camera;
     OptixTraversableHandle traversable;
-    NeuralNetworkParams neural_network;
+    // Support multiple neural assets: pointer to an array of NeuralNetworkParams
+    uint32_t num_neural_assets;
+    NeuralNetworkParams* neural_networks; // device pointer to array
+    NeuralAssetBounds* neural_bounds_array; // device pointer to array
+    
+    int* instance_to_neural_map;
+    
     NeuralAssetBounds neural_bounds;
+    NeuralNetworkParams neural_network; // device pointer to array
+    
     PointLight light;
     float3_aligned background_color;
+
+    // Warp divergence profiling output
+    uint32_t* divergence_buffer;
 };
+
+// Simple scene representation
+struct SceneObject {
+    // Identity transform for convenience
+    float identity[12] = {
+        1.0f, 0.0f, 0.0f, 0.0f,
+        0.0f, 1.0f, 0.0f, 0.0f,
+        0.0f, 0.0f, 1.0f, 0.0f
+    };
+    enum Type { MESH, NEURAL } type;
+    std::string file;       // for meshes
+    std::string weights;    // for neural assets
+    float3 bounds_min;
+    float3 bounds_max;
+    bool has_bounds = false;
+    float transform[12]; // 3x4 row-major
+    SceneObject() { for (int i=0;i<12;i++) transform[i]=identity[i]; }
+};
+
+float3 readFloat3(const YAML::Node& node) {
+    return make_float3(
+        node[0].as<float>(),
+        node[1].as<float>(),
+        node[2].as<float>()
+    );
+}
+
+float3_aligned readFloat3Aligned(const YAML::Node& node) {
+    float3 vec = make_float3(
+        node[0].as<float>(),
+        node[1].as<float>(),
+        node[2].as<float>()
+    );
+
+    return { vec.x, vec.y, vec.z };
+}
+
+// Build a very basic transform: T = translate * scale (no rotation for simplicity)
+void buildTransform(const YAML::Node& tnode, float out[12]) {
+    // Start as identity
+    float T[12] = {
+        1,0,0,0,
+        0,1,0,0,
+        0,0,1,0
+    };
+
+    // Scale
+    if (tnode["scale"]) {
+        float3 s = readFloat3(tnode["scale"]);
+        T[0] *= s.x;  T[1] *= s.x;  T[2]  *= s.x;
+        T[4] *= s.y;  T[5] *= s.y;  T[6]  *= s.y;
+        T[8] *= s.z;  T[9] *= s.z;  T[10] *= s.z;
+    }
+
+    // Position (translation)
+    if (tnode["position"]) {
+        float3 p = readFloat3(tnode["position"]);
+        T[3]  = p.x;
+        T[7]  = p.y;
+        T[11] = p.z;
+    }
+
+    // Rotation ignored for minimal example, but can be added easily.
+
+    // Copy out
+    for (int i = 0; i < 12; i++) out[i] = T[i];
+}
+
+std::vector<SceneObject> load_scene_objects(const YAML::Node& root) {
+    std::vector<SceneObject> objects;
+
+    auto obj_list = root["scene"]["objects"];
+    if (!obj_list) return objects;
+
+    for (const auto& node : obj_list) {
+        SceneObject obj;
+
+        // --- TYPE ---
+        std::string t = node["type"].as<std::string>();
+        if (t == "mesh")
+            obj.type = SceneObject::MESH;
+        else if (t == "neural_asset")
+            obj.type = SceneObject::NEURAL;
+        else
+            continue; // unknown type
+
+        // --- FILE / WEIGHTS ---
+        if (node["file"])
+            obj.file = node["file"].as<std::string>();
+
+        if (node["weights"])
+            obj.weights = node["weights"].as<std::string>();
+
+        // --- BOUNDS ---
+        if (node["bounds"]) {
+            auto b = node["bounds"];
+            obj.bounds_min = readFloat3(b["min"]);
+            obj.bounds_max = readFloat3(b["max"]);
+            obj.has_bounds = true;
+        }
+
+        // --- TRANSFORM ---
+        if (node["transform"])
+            buildTransform(node["transform"], obj.transform);
+
+        objects.push_back(obj);
+    }
+
+    return objects;
+}
 
 // Simple PPM image writer
 void write_ppm(const std::string& filename, const uchar4* pixels, int width, int height) {
@@ -77,24 +217,72 @@ void write_ppm(const std::string& filename, const uchar4* pixels, int width, int
 }
 
 int main(int argc, char** argv) {
-    std::cout << "=== OptiX Neural Renderer - Phase 3 ===" << std::endl;
+    std::cout << "=== OptiX Neural Renderer - Phase 3/4 ===" << std::endl;
 
     // Parse command line arguments
+    // Backwards-compatible defaults
     std::string weight_file = "data/models/weights.bin";
     std::string output_file = "output/neural_render.ppm";
     int width = 512;
     int height = 512;
+    std::string scene_file; // optional YAML scene file
 
-    if (argc > 1) weight_file = argv[1];
+    // Simple CLI: <program> [weight_or_scene] [output] [width] [height]
+    if (argc > 1) {
+        std::string a1 = argv[1];
+        // treat as scene file if it ends with .yaml or .yml
+        if (a1.size() > 5 && (a1.substr(a1.size()-5) == ".yaml" || a1.substr(a1.size()-4) == ".yml")) {
+            scene_file = a1;
+        } else {
+            weight_file = a1;
+        }
+    }
     if (argc > 2) output_file = argv[2];
     if (argc > 3) width = std::atoi(argv[3]);
     if (argc > 4) height = std::atoi(argv[4]);
 
     std::cout << "Configuration:" << std::endl;
-    std::cout << "  Weight file: " << weight_file << std::endl;
+    if (!scene_file.empty()) std::cout << "  Scene file: " << scene_file << std::endl;
+    else std::cout << "  Weight file: " << weight_file << std::endl;
     std::cout << "  Output: " << output_file << std::endl;
     std::cout << "  Resolution: " << width << "x" << height << std::endl;
+    YAML::Node root;
 
+    try {
+        root = YAML::LoadFile(scene_file);
+    } catch (const std::exception& e) {
+        std::cerr << "Failed to load YAML: " << e.what() << std::endl;
+        return 1;
+    }
+
+    // --- CAMERA ---
+    const auto camera = root["scene"]["camera"];
+    float3 cam_pos    = readFloat3(camera["position"]);
+    float3 cam_look   = readFloat3(camera["look_at"]);
+    float fov       = camera["fov"].as<float>();
+
+    std::cout << "Camera:\n";
+    std::cout << "  Position: " << cam_pos.x << ", " << cam_pos.y << ", " << cam_pos.z << "\n";
+    std::cout << "  Look At:  " << cam_look.x << ", " << cam_look.y << ", " << cam_look.z << "\n";
+    std::cout << "  FOV:      " << fov << "\n\n";
+
+    // --- LIGHTS ---
+    // const auto lights = root["scene"]["lights"];
+    // std::cout << "Lights:\n";
+    // for (const auto& light : lights) {
+    //     std::string type = light["type"].as<std::string>();
+    //     auto pos = readFloat3(light["position"]);
+    //     auto intensity = readFloat3(light["intensity"]);
+
+    //     std::cout << "  Light (" << type << ")\n";
+    //     std::cout << "    Position:  " 
+    //               << pos.x << ", " << pos.y << ", " << pos.z << "\n";
+    //     std::cout << "    Intensity: " 
+    //               << intensity.x << ", " << intensity.y << ", " << intensity.z << "\n";
+    // }
+    // std::cout << "\n";
+
+    
     // Initialize OptiX context
     optix::Context context;
     if (!context.initialize()) {
@@ -117,23 +305,28 @@ int main(int argc, char** argv) {
     network_config.depth_decoder.n_decoder_layers = 4;
 
     // Load weights and convert to OptiX format
-    neural::WeightLoader weight_loader;
-    optix::NeuralNetworkParamsHost neural_params(network_config);
+    // neural::WeightLoader weight_loader;
+    // optix::NeuralNetworkParamsHost neural_params(network_config);
 
-    bool weights_loaded = false;
-    if (weight_loader.load_from_file(weight_file)) {
-        std::cout << "Loaded weights from: " << weight_file << std::endl;
-        if (neural_params.load_from_weights(weight_loader)) {
-            std::cout << "Neural network parameters converted for OptiX" << std::endl;
-            weights_loaded = true;
-        } else {
-            std::cerr << "Warning: Failed to convert weights for OptiX" << std::endl;
-        }
-    } else {
-        std::cerr << "Warning: Could not load weights from " << weight_file << std::endl;
-        std::cerr << "You need to provide a valid weight file to render neural assets" << std::endl;
-        return 1;
-    }
+    // bool weights_loaded = false;
+    // if (!scene_file.empty()) {
+    //     // If a scene file is provided, weight loading will be handled per-object later
+    //     std::cout << "Scene mode: deferring weight loading to per-object handling" << std::endl;
+    // } else {
+    //     if (weight_loader.load_from_file(weight_file)) {
+    //         std::cout << "Loaded weights from: " << weight_file << std::endl;
+    //         if (neural_params.load_from_weights(weight_loader)) {
+    //             std::cout << "Neural network parameters converted for OptiX" << std::endl;
+    //             weights_loaded = true;
+    //         } else {
+    //             std::cerr << "Warning: Failed to convert weights for OptiX" << std::endl;
+    //         }
+    //     } else {
+    //         std::cerr << "Warning: Could not load weights from " << weight_file << std::endl;
+    //         std::cerr << "You need to provide a valid weight file to render neural assets" << std::endl;
+    //         return 1;
+    //     }
+    // }
 
     // Build OptiX pipeline
     optix::Pipeline pipeline(context);
@@ -147,53 +340,57 @@ int main(int argc, char** argv) {
     float3 neural_min = make_float3(-1.0f, -1.0f, -1.0f);
     float3 neural_max = make_float3(1.0f, 1.0f, 1.0f);
 
-    // Build triangle geometry BLASes
-    std::cout << "\nBuilding triangle geometry..." << std::endl;
+    // Build TLAS with mixed geometry driven by an optional scene file
+    std::cout << "\nBuilding geometry and TLAS..." << std::endl;
     optix::TriangleGeometry triangle_geom(context);
-    OptixTraversableHandle floor_blas = triangle_geom.build_floor_blas();
-    OptixTraversableHandle walls_blas = triangle_geom.build_walls_blas();
-
-    // Build neural asset BLAS
-    std::cout << "\nBuilding neural asset geometry..." << std::endl;
     optix::GeometryBuilder neural_geom(context);
-    OptixTraversableHandle neural_blas = neural_geom.build_neural_asset_blas(
-        neural_min, neural_max);
-
-    // Build TLAS with all instances
-    std::cout << "\nBuilding TLAS with mixed geometry..." << std::endl;
     optix::TLASBuilder tlas_builder(context);
-
-    // Identity transform
-    float identity[12] = {
-        1.0f, 0.0f, 0.0f, 0.0f,
-        0.0f, 1.0f, 0.0f, 0.0f,
-        0.0f, 0.0f, 1.0f, 0.0f
+    
+    auto trim = [](std::string s) {
+        while (!s.empty() && isspace((unsigned char)s.front())) s.erase(s.begin());
+        while (!s.empty() && isspace((unsigned char)s.back())) s.pop_back();
+        return s;
     };
 
-    // Add floor instance (instanceId=0, sbtOffset=0 for triangles)
-    tlas_builder.add_instance(floor_blas, 0, 0, identity);
-
-    // Add walls instance (instanceId=1, sbtOffset=0 for triangles)
-    tlas_builder.add_instance(walls_blas, 1, 0, identity);
-
-    // Add neural asset instance (instanceId=2, sbtOffset=2 for neural)
-    // Position it 1 unit above the floor (floor is at Y=-1, neural BLAS is [-1,1], so translate by 1.0 to sit on floor)
-    float neural_transform[12] = {
-        1.0f, 0.0f, 0.0f, 0.0f,
-        0.0f, 1.0f, 0.0f, 1.0f,  // Translate Y=1.0 (places bottom of neural asset at Y=0, which is 1 unit above floor at Y=-1)
-        0.0f, 0.0f, 1.0f, 0.0f
+    auto parse_vec3 = [&](const std::string& token)->float3 {
+        float3 v = make_float3(0.0f,0.0f,0.0f);
+        auto l = token.find('[');
+        auto r = token.find(']');
+        if (l!=std::string::npos && r!=std::string::npos && r>l) {
+            std::string inside = token.substr(l+1, r-l-1);
+            std::replace(inside.begin(), inside.end(), ',', ' ');
+            std::istringstream iss(inside);
+            iss >> v.x >> v.y >> v.z;
+        }
+        return v;
     };
-    tlas_builder.add_instance(neural_blas, 2, 2, neural_transform);
 
-    // Build the TLAS
-    OptixTraversableHandle traversable = tlas_builder.build();
+    // std::vector<SceneObject> scene_objects;
+    // if (!scene_file.empty()) {
+    std::vector<SceneObject> scene_objects = load_scene_objects(root);
 
-    // Build shader binding table
-    optix::ShaderBindingTable sbt(context, pipeline);
-    if (!sbt.build()) {
-        std::cerr << "Failed to build shader binding table" << std::endl;
-        return 1;
-    }
+    std::cout << "Parsed " << scene_objects.size() << " objects from scene file." << std::endl;
+    // } else {
+    //     // Default simple scene (floor + walls + one neural asset)
+    //     SceneObject floor_obj;
+    //     floor_obj.type = SceneObject::MESH;
+    //     floor_obj.file = "floor";
+    //     scene_objects.push_back(floor_obj);
+
+    //     SceneObject walls_obj;
+    //     walls_obj.type = SceneObject::MESH;
+    //     walls_obj.file = "walls";
+    //     scene_objects.push_back(walls_obj);
+
+    //     SceneObject neural_obj;
+    //     neural_obj.type = SceneObject::NEURAL;
+    //     neural_obj.has_bounds = true;
+    //     neural_obj.bounds_min = make_float3(-1.0f,-1.0f,-1.0f);
+    //     neural_obj.bounds_max = make_float3(1.0f,1.0f,1.0f);
+    //     // translate neural asset 1 unit up like before
+    //     neural_obj.transform[7] = 1.0f; // Y translation (index 7)
+    //     scene_objects.push_back(neural_obj);
+    // }
 
     // Allocate frame buffers
     uchar4* d_frame_buffer = nullptr;
@@ -205,6 +402,11 @@ int main(int argc, char** argv) {
     CUDA_CHECK(cudaMalloc(&d_direction_buffer, width * height * sizeof(uchar4)));
     CUDA_CHECK(cudaMalloc(&d_unnormalized_position_buffer, width * height * sizeof(float3_aligned)));
 
+    // Allocate divergence profiling buffer
+    uint32_t* d_divergence_buffer = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_divergence_buffer, width * height * NUM_DIVERGENCE_METRICS * sizeof(uint32_t)));
+    CUDA_CHECK(cudaMemset(d_divergence_buffer, 0, width * height * NUM_DIVERGENCE_METRICS * sizeof(uint32_t)));
+
     // Set up launch parameters
     LaunchParams launch_params = {};
     launch_params.frame_buffer = d_frame_buffer;
@@ -213,14 +415,218 @@ int main(int argc, char** argv) {
     launch_params.unnormalized_position_buffer = d_unnormalized_position_buffer;
     launch_params.width = width;
     launch_params.height = height;
-    launch_params.traversable = traversable;
+    launch_params.divergence_buffer = d_divergence_buffer;
 
-    // Copy neural network parameters
-    launch_params.neural_network = neural_params.get_device_params();
+    // Build BLASes and add instances
+    const int TRIANGLE_SBT_OFFSET = 0; // must match SBT hitgroup ordering
+    const int NEURAL_SBT_OFFSET = 2;   // must match SBT hitgroup ordering used in programs
+
+    int instance_id = 0;
+
+    // Storage for per-neural-asset parameters (keep hosts alive)
+    std::vector<std::unique_ptr<optix::NeuralNetworkParamsHost>> neural_hosts;
+    std::vector<NeuralNetworkParams> host_nn_params_values;
+    std::vector<NeuralAssetBounds> host_neural_bounds;
+
+    // Mapping from instance ID to neural asset index (-1 for non-neural instances)
+    std::vector<int> instance_to_neural_vec;
+
+    for (auto &obj : scene_objects) {
+        if (obj.type == SceneObject::MESH) {
+            instance_to_neural_vec.push_back(-1);  // Not a neural asset
+            OptixTraversableHandle mesh_blas = 0;
+            void* d_vertex_buffer = nullptr;
+            void* d_index_buffer = nullptr;
+
+            if (obj.file == "floor") {
+                mesh_blas = triangle_geom.build_floor_blas();
+                d_vertex_buffer = triangle_geom.get_floor_vertex_buffer();
+                d_index_buffer = triangle_geom.get_floor_index_buffer();
+            } else if (obj.file == "walls") {
+                mesh_blas = triangle_geom.build_walls_blas();
+                d_vertex_buffer = triangle_geom.get_walls_vertex_buffer();
+                d_index_buffer = triangle_geom.get_walls_index_buffer();
+            } else if (obj.file.size() > 4 && obj.file.substr(obj.file.size()-4) == ".obj") {
+                // Load mesh from OBJ file using tinyobjloader
+                std::vector<Vertex> vertices;
+                std::vector<uint3> indices;
+                tinyobj::ObjReaderConfig config;
+                config.vertex_color = false;
+                tinyobj::ObjReader reader;
+                if (!reader.ParseFromFile(obj.file, config)) {
+                    std::cerr << "Failed to load OBJ file: " << obj.file << "\n" << reader.Error() << std::endl;
+                } else {
+                    const auto& attrib = reader.GetAttrib();
+                    const auto& shapes = reader.GetShapes();
+                    // Build vertices
+                    for (size_t v = 0; v < attrib.vertices.size() / 3; ++v) {
+                        Vertex vert;
+                        vert.position.x = attrib.vertices[3*v+0];
+                        vert.position.y = attrib.vertices[3*v+1];
+                        vert.position.z = attrib.vertices[3*v+2];
+                        // If normals present, use them
+                        if (attrib.normals.size() >= 3*(v+1)) {
+                            vert.normal.x = attrib.normals[3*v+0];
+                            vert.normal.y = attrib.normals[3*v+1];
+                            vert.normal.z = attrib.normals[3*v+2];
+                        } else {
+                            vert.normal = {0.0f, 1.0f, 0.0f};
+                        }
+                        vertices.push_back(vert);
+                    }
+                    // Build indices
+                    for (const auto& shape : shapes) {
+                        size_t index_offset = 0;
+                        for (size_t f = 0; f < shape.mesh.num_face_vertices.size(); ++f) {
+                            int fv = shape.mesh.num_face_vertices[f];
+                            if (fv == 3) {
+                                uint3 tri;
+                                tri.x = shape.mesh.indices[index_offset+0].vertex_index;
+                                tri.y = shape.mesh.indices[index_offset+1].vertex_index;
+                                tri.z = shape.mesh.indices[index_offset+2].vertex_index;
+                                indices.push_back(tri);
+                            }
+                            index_offset += fv;
+                        }
+                    }
+                    void* d_blas_buffer = nullptr;
+                    size_t blas_size = 0;
+                    mesh_blas = triangle_geom.build_mesh_blas(vertices, indices, &d_vertex_buffer, &d_index_buffer, &d_blas_buffer, &blas_size);
+                }
+            } else {
+                // Unknown mesh file -- fallback to floor for now
+                std::cerr << "Warning: mesh file '" << obj.file << "' not supported; using floor placeholder." << std::endl;
+                mesh_blas = triangle_geom.build_floor_blas();
+                d_vertex_buffer = triangle_geom.get_floor_vertex_buffer();
+                d_index_buffer = triangle_geom.get_floor_index_buffer();
+            }
+
+            // Create metadata with buffer pointers
+            optix::InstanceMetadata metadata = {};
+            metadata.type = optix::GeometryType::TRIANGLE_MESH;
+            metadata.neural_params_device = nullptr;
+            metadata.albedo = {0.8f, 0.8f, 0.8f};
+            metadata.roughness = 0.5f;
+            metadata.vertex_buffer = d_vertex_buffer;
+            metadata.index_buffer = d_index_buffer;
+
+            tlas_builder.add_instance_with_metadata(mesh_blas, metadata, obj.transform);
+        } else { // NEURAL
+            
+            // bool weights_loaded = false;
+            // If the scene specified weights for this neural object, attempt to load and convert
+            if (!obj.weights.empty()) {
+                auto host = std::make_unique<optix::NeuralNetworkParamsHost>(network_config);
+                neural::WeightLoader local_loader;
+                if (local_loader.load_from_file(obj.weights)) {
+                    if (host->load_from_weights(local_loader)) {
+                        std::cout << "Loaded weights for neural object from: " << obj.weights << std::endl;
+                        
+                        // Record mapping from this instance ID to neural asset index
+                        instance_to_neural_vec.push_back(launch_params.num_neural_assets);
+                        
+                        float3 bmin = neural_min;
+                        float3 bmax = neural_max;
+                        if (obj.has_bounds) { bmin = obj.bounds_min; bmax = obj.bounds_max; }
+                        
+                        OptixTraversableHandle n_blas = neural_geom.build_neural_asset_blas(bmin, bmax);
+                        tlas_builder.add_instance(n_blas, instance_id, optix::GeometryType::NEURAL_ASSET, obj.transform);
+                        std::cout << "Converted neural params for this object." << std::endl;
+                    
+                        // Keep host alive by moving into vector
+                        host_nn_params_values.push_back(host->get_device_params());
+                        host_neural_bounds.push_back({{obj.bounds_min.x, obj.bounds_min.y, obj.bounds_min.z}, {obj.bounds_max.x, obj.bounds_max.y, obj.bounds_max.z}});
+                        neural_hosts.push_back(std::move(host));
+                        
+                        launch_params.num_neural_assets++;
+                        instance_id++;
+                    } else {
+                        std::cerr << "Warning: failed to convert weights for object: " << obj.weights << std::endl;
+                    }
+                } else {
+                    std::cerr << "Warning: could not load weights file: " << obj.weights << std::endl;
+                }
+            // } else {
+            //     // No per-object weights specified: if a global weights set was loaded earlier, reuse it
+            //     if (weights_loaded) {
+            //         host_nn_params_values.push_back(neural_params.get_device_params());
+            //         host_neural_bounds.push_back({{bmin.x, bmin.y, bmin.z}, {bmax.x, bmax.y, bmax.z}});
+            //     } else {
+            //         // no weights available for this neural object
+            //         std::cerr << "Warning: neural object has no weights and no global weights provided; it will use default (possibly empty) params." << std::endl;
+            //         host_nn_params_values.push_back(neural_params.get_device_params());
+            //         host_neural_bounds.push_back({{bmin.x, bmin.y, bmin.z}, {bmax.x, bmax.y, bmax.z}});
+            //     }
+            }
+        }
+    }
+
+    // Build the TLAS
+    launch_params.traversable = tlas_builder.build();
+
+    // Build shader binding table with instance metadata
+    optix::ShaderBindingTable sbt(context, pipeline);
+    if (!sbt.build(tlas_builder.get_instance_metadata())) {
+        std::cerr << "Failed to build shader binding table" << std::endl;
+        return 1;
+    }
+
+    // Copy neural network parameters (support multiple neural assets)
+    NeuralNetworkParams* d_neural_array = nullptr;
+    NeuralAssetBounds* d_neural_bounds_array = nullptr;
+    int* d_instance_to_neural_map = nullptr;
+
+    // Upload instance-to-neural mapping
+    if (!instance_to_neural_vec.empty()) {
+        CUDA_CHECK(cudaMalloc(&d_instance_to_neural_map, instance_to_neural_vec.size() * sizeof(int)));
+        CUDA_CHECK(cudaMemcpy(d_instance_to_neural_map, instance_to_neural_vec.data(),
+                   instance_to_neural_vec.size() * sizeof(int), cudaMemcpyHostToDevice));
+        launch_params.instance_to_neural_map = d_instance_to_neural_map;
+    } else {
+        launch_params.instance_to_neural_map = nullptr;
+    }
+
+    std::cout << "launch_params.num_neural_assets: " << launch_params.num_neural_assets;
+    std::cout << ", len host_nn_params_values: " << host_nn_params_values.size() << std::endl;
+    if (!host_nn_params_values.empty()) {
+        size_t n = host_nn_params_values.size();
+        CUDA_CHECK(cudaMalloc(&d_neural_array, n * sizeof(NeuralNetworkParams)));
+        CUDA_CHECK(cudaMemcpy(d_neural_array, host_nn_params_values.data(), n * sizeof(NeuralNetworkParams), cudaMemcpyHostToDevice));
+
+        CUDA_CHECK(cudaMalloc(&d_neural_bounds_array, n * sizeof(NeuralAssetBounds)));
+        CUDA_CHECK(cudaMemcpy(d_neural_bounds_array, host_neural_bounds.data(), n * sizeof(NeuralAssetBounds), cudaMemcpyHostToDevice));
+
+        // launch_params.num_neural_assets = static_cast<uint32_t>(n);
+        launch_params.neural_networks = d_neural_array;
+        launch_params.neural_bounds_array = d_neural_bounds_array;
+        // Also keep the first bounds for legacy single-network code paths
+        launch_params.neural_network = host_nn_params_values[0];
+        launch_params.neural_bounds = host_neural_bounds[0];
+    // } else {
+    //     // No per-object neural assets collected; fall back to single global params if available
+    //     launch_params.num_neural_assets = weights_loaded ? 1u : 0u;
+    //     if (weights_loaded) {
+    //         // copy single NeuralNetworkParams struct into device memory so the shader can reference it
+    //         CUDA_CHECK(cudaMalloc(&d_neural_array, sizeof(NeuralNetworkParams)));
+    //         NeuralNetworkParams tmp = neural_params.get_device_params();
+    //         CUDA_CHECK(cudaMemcpy(d_neural_array, &tmp, sizeof(NeuralNetworkParams), cudaMemcpyHostToDevice));
+    //         CUDA_CHECK(cudaMalloc(&d_neural_bounds_array, sizeof(NeuralAssetBounds)));
+    //         NeuralAssetBounds b = {{neural_min.x, neural_min.y, neural_min.z}, {neural_max.x, neural_max.y, neural_max.z}};
+    //         CUDA_CHECK(cudaMemcpy(d_neural_bounds_array, &b, sizeof(NeuralAssetBounds), cudaMemcpyHostToDevice));
+
+    //         launch_params.neural_networks = d_neural_array;
+    //         launch_params.neural_bounds_array = d_neural_bounds_array;
+    //         launch_params.neural_bounds = b;
+    //     } else {
+    //         launch_params.neural_networks = nullptr;
+    //         launch_params.neural_bounds_array = nullptr;
+    //         launch_params.neural_bounds = { {neural_min.x, neural_min.y, neural_min.z}, {neural_max.x, neural_max.y, neural_max.z} };
+    //     }
+    }
 
     // Set up camera (view from angle to see both floor and neural asset)
-    launch_params.camera.position = {3.0f, 2.0f, 5.0f};
-    launch_params.camera.fov = 90.0f;
+    launch_params.camera.position = { cam_pos.x, cam_pos.y, cam_pos.z };
+    launch_params.camera.fov = fov;
 
     // Camera basis vectors (looking toward origin)
     float aspect = (float)width / (float)height;
@@ -236,9 +642,9 @@ int main(int argc, char** argv) {
     launch_params.neural_bounds.max = {neural_max.x, neural_max.y, neural_max.z};
 
     // Setup point light (above the scene)
-    launch_params.light.position = {0.0f, 3.0f, 0.0f};
-    launch_params.light.color = {1.0f, 1.0f, 1.0f};
-    launch_params.light.intensity = 100.0f;
+    launch_params.light.position = readFloat3Aligned(root["scene"]["light"]["position"]);
+    launch_params.light.color = readFloat3Aligned(root["scene"]["light"]["color"]);
+    launch_params.light.intensity = root["scene"]["light"]["intensity"].as<float>();
 
     // Background color (dark gray)
     launch_params.background_color = {0.1f, 0.1f, 0.15f};
@@ -305,6 +711,14 @@ int main(int argc, char** argv) {
         width * height * sizeof(float3_aligned),
         cudaMemcpyDeviceToHost));
 
+    // Download divergence profiling data
+    std::vector<uint32_t> h_divergence_buffer(width * height * NUM_DIVERGENCE_METRICS);
+    CUDA_CHECK(cudaMemcpy(
+        h_divergence_buffer.data(),
+        d_divergence_buffer,
+        width * height * NUM_DIVERGENCE_METRICS * sizeof(uint32_t),
+        cudaMemcpyDeviceToHost));
+
     // Write output images
     write_ppm(output_file, h_frame_buffer.data(), width, height);
 
@@ -339,12 +753,37 @@ int main(int argc, char** argv) {
         std::cout << "Wrote unnormalized positions to: " << unnorm_file << std::endl;
     }
 
+    // Write divergence profiling metrics to binary file
+    std::string div_file = output_file;
+    if (dot_pos != std::string::npos) {
+        div_file = div_file.substr(0, dot_pos) + "_divergence.bin";
+    } else {
+        div_file += "_divergence.bin";
+    }
+
+    std::ofstream div_bin_file(div_file, std::ios::binary);
+    if (div_bin_file.is_open()) {
+        // Write header: [width, height, num_metrics]
+        uint32_t header[3] = {(uint32_t)width, (uint32_t)height, NUM_DIVERGENCE_METRICS};
+        div_bin_file.write(reinterpret_cast<const char*>(header), 3 * sizeof(uint32_t));
+
+        // Write divergence data
+        div_bin_file.write(reinterpret_cast<const char*>(h_divergence_buffer.data()),
+                           width * height * NUM_DIVERGENCE_METRICS * sizeof(uint32_t));
+        div_bin_file.close();
+        std::cout << "Wrote divergence metrics to: " << div_file << std::endl;
+    }
+
     // Cleanup
     cudaFree(d_frame_buffer);
     cudaFree(d_position_buffer);
     cudaFree(d_direction_buffer);
     cudaFree(d_unnormalized_position_buffer);
+    cudaFree(d_divergence_buffer);
     cudaFree(d_launch_params);
+    if (d_neural_array) cudaFree(d_neural_array);
+    if (d_neural_bounds_array) cudaFree(d_neural_bounds_array);
+    if (d_instance_to_neural_map) cudaFree(d_instance_to_neural_map);
 
     std::cout << "\n=== Rendering Complete ===" << std::endl;
     std::cout << "Output saved to: " << output_file << std::endl;

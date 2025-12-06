@@ -3,6 +3,7 @@
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include "neural_types.h"
+#include "divergence_profiling.cuh"
 
 // ============================================================================
 // Activation Functions
@@ -51,10 +52,12 @@ __device__ __forceinline__ uint32_t hash_grid_index(
 // Hash grid encoding with trilinear interpolation
 // Input: 3D position (x, y, z) in [0, 1]^3
 // Output: encoded features (n_levels * n_features_per_level dimensions)
+// div_counter: optional pointer to accumulate divergence measurements
 __device__ __forceinline__ void hash_encode(
     const float3& position,
     const HashGridParams& params,
-    float* output
+    float* output,
+    unsigned int* div_counter = nullptr
 ) {
     // For each level in the hash grid
     for (uint32_t level = 0; level < params.n_levels; ++level) {
@@ -98,8 +101,15 @@ __device__ __forceinline__ void hash_encode(
                 uint32_t dz = (i & 4) >> 2;
 
                 uint32_t hash_idx = 0;
+                bool use_direct_index = (grid_volume <= hashmap_size);
+
+                // Measure divergence: direct indexing vs hashing
+                if (div_counter != nullptr) {
+                    *div_counter += measure_divergence(use_direct_index);
+                }
+
                 // If grid fits into hashmap at this resolution, directly index
-                if (grid_volume <= hashmap_size) {
+                if (use_direct_index) {
                     hash_idx = x0 + dx;
                     hash_idx += (y0 + dy) * grid_resolution;
                     hash_idx += (z0 + dz) * grid_resolution * grid_resolution;
@@ -229,11 +239,13 @@ __device__ __forceinline__ void apply_activation_fp16(
 // params: MLP parameters (layers, activation)
 // output: output vector
 // scratch: temporary buffer for intermediate activations (must be large enough)
+// div_counter: optional pointer to accumulate divergence measurements
 __device__ __forceinline__ void mlp_forward(
     const float* input,
     const MLPParams& params,
     float* output,
-    float* scratch
+    float* scratch,
+    unsigned int* div_counter = nullptr
 ) {
     const float* current_input = input;
     float* layer_output = scratch;
@@ -254,7 +266,14 @@ __device__ __forceinline__ void mlp_forward(
         );
 
         // Apply activation
-        if (l < params.n_layers - 1) {
+        bool is_hidden_layer = (l < params.n_layers - 1);
+
+        // Measure divergence: hidden vs output layer activation
+        if (div_counter != nullptr) {
+            *div_counter += measure_divergence(is_hidden_layer);
+        }
+
+        if (is_hidden_layer) {
             // Hidden layers: use ReLU
             apply_activation(layer_output, layer.out_dim, "ReLU");
         } else {
@@ -338,13 +357,17 @@ __device__ __forceinline__ void mlp_forward_fp16(
 // direction: 3D direction vector (normalized)
 // net_params: all network parameters
 // Output: visibility, normal (3D), depth
+// div_hash: optional pointer to accumulate hash encoding divergence
+// div_mlp: optional pointer to accumulate MLP divergence
 __device__ __forceinline__ void neural_inference(
     const float3& position,
     const float3& direction,
     const NeuralNetworkParams& net_params,
     float& visibility,
     float3& normal,
-    float& depth
+    float& depth,
+    unsigned int* div_hash = nullptr,
+    unsigned int* div_mlp = nullptr
 ) {
     // Allocate local scratch buffer (on stack)
     // Memory layout:
@@ -359,7 +382,7 @@ __device__ __forceinline__ void neural_inference(
 
     // Step 1: Hash encode position -> 32D
     float* position_encoding = scratch;
-    hash_encode(position, net_params.hash_encoding, position_encoding);
+    hash_encode(position, net_params.hash_encoding, position_encoding, div_hash);
     uint32_t pos_encoding_dim = net_params.hash_encoding.n_levels *
                                  net_params.hash_encoding.n_features_per_level;
 
@@ -376,7 +399,7 @@ __device__ __forceinline__ void neural_inference(
 
     float* direction_encoding = scratch + 80;
     float* dir_scratch = scratch + 96;
-    mlp_forward(direction_input, net_params.direction_encoder, direction_encoding, dir_scratch);
+    mlp_forward(direction_input, net_params.direction_encoder, direction_encoding, dir_scratch, div_mlp);
 
     // Step 3: Concatenate position + direction encodings -> 48D
     float* concatenated = scratch + 240;  // Updated offset
@@ -395,16 +418,16 @@ __device__ __forceinline__ void neural_inference(
 
     // Visibility decoder (48D -> 32D -> 32D -> 32D -> 1D with sigmoid)
     float vis_output[16];
-    mlp_forward(concatenated, net_params.visibility_decoder, vis_output, decoder_scratch);
+    mlp_forward(concatenated, net_params.visibility_decoder, vis_output, decoder_scratch, div_mlp);
     visibility = vis_output[0];
 
     // Normal decoder (48D -> 32D -> 32D -> 32D -> 3D)
     float norm_output[16];
-    mlp_forward(concatenated, net_params.normal_decoder, norm_output, decoder_scratch);
+    mlp_forward(concatenated, net_params.normal_decoder, norm_output, decoder_scratch, div_mlp);
     normal = make_float3(norm_output[0], norm_output[1], norm_output[2]);
 
     // Depth decoder (48D -> 32D -> 32D -> 32D -> 1D)
     float depth_output[16];
-    mlp_forward(concatenated, net_params.depth_decoder, depth_output, decoder_scratch);
+    mlp_forward(concatenated, net_params.depth_decoder, depth_output, decoder_scratch, div_mlp);
     depth = depth_output[0];
 }

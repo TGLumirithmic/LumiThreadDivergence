@@ -5,9 +5,42 @@
 #include <optix.h>
 #include "neural_inference.cuh"
 
+// ============================================================================
+// Warp Divergence Profiling Configuration
+// ============================================================================
+
+// Divergence metric indices for the divergence_buffer
+#define DIVERGENCE_RAYGEN 0
+#define DIVERGENCE_INTERSECTION 1
+#define DIVERGENCE_CLOSESTHIT 2
+#define DIVERGENCE_SHADOW 3
+#define DIVERGENCE_HASH_ENCODING 4
+#define DIVERGENCE_MLP_FORWARD 5
+#define DIVERGENCE_EARLY_REJECT 6
+#define DIVERGENCE_HIT_MISS 7
+#define DIVERGENCE_INSTANCE_ENTROPY 8
+#define NUM_DIVERGENCE_METRICS 9
+
 // Simple 3D vector structure
 struct float3_aligned {
     float x, y, z;
+};
+
+// Include Vertex structure (shared with host code)
+#include "../include/vertex.h"
+
+// Material data for Shader Binding Table (SBT)
+// This struct is accessed by closest-hit programs via optixGetSbtDataPointer()
+struct MaterialData {
+    float3_aligned albedo;
+    float roughness;
+
+    // Neural network parameters (device pointer), nullptr for mesh instances
+    NeuralNetworkParams* neural_params;
+
+    // Triangle mesh data (device pointers), nullptr for neural assets
+    Vertex* vertex_buffer;   // Device pointer to vertex array
+    uint3* index_buffer;     // Device pointer to index array
 };
 
 // Ray payload for primary rays
@@ -57,9 +90,18 @@ struct LaunchParams {
     OptixTraversableHandle traversable;
 
     // Neural network parameters (custom OptiX-compatible implementation)
-    NeuralNetworkParams neural_network;
+    // Support for multiple neural assets
+    uint32_t num_neural_assets;
+    NeuralNetworkParams* neural_networks;  // Device pointer to array
+    NeuralAssetBounds* neural_bounds_array;  // Device pointer to array
 
-    // Neural asset bounds
+    // Mapping from instance ID to neural asset index
+    // instance_to_neural[instance_id] = neural_asset_index
+    // -1 if instance is not a neural asset
+    int* instance_to_neural_map;  // Device pointer to array
+
+    // Legacy single neural network support (for backward compatibility)
+    NeuralNetworkParams neural_network;
     NeuralAssetBounds neural_bounds;
 
     // Lighting
@@ -67,4 +109,9 @@ struct LaunchParams {
 
     // Background color
     float3_aligned background_color;
+
+    // Warp divergence profiling output
+    // Buffer size: width * height * NUM_DIVERGENCE_METRICS
+    // Each pixel stores 7 divergence counters (one per metric)
+    uint32_t* divergence_buffer;
 };

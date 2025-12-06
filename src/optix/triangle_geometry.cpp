@@ -1,6 +1,7 @@
 #include "triangle_geometry.h"
 #include "optix_stubs.h"
 #include "utils/error.h"
+#include "vertex.h"  // Vertex struct definition
 #include <vector>
 #include <iostream>
 
@@ -187,6 +188,26 @@ OptixTraversableHandle TriangleGeometry::build_triangle_blas(
               << num_vertices << " vertices" << std::endl;
 
     return traversable_handle;
+}
+
+OptixTraversableHandle TriangleGeometry::build_mesh_blas(
+    const std::vector<Vertex>& vertices,
+    const std::vector<uint3>& indices,
+    void** d_vertex_buffer_out,
+    void** d_index_buffer_out,
+    void** d_blas_buffer_out,
+    size_t* blas_size_out
+) {
+    return build_triangle_blas(
+        vertices.data(),
+        vertices.size(),
+        indices.data(),
+        indices.size(),
+        d_vertex_buffer_out,
+        d_index_buffer_out,
+        d_blas_buffer_out,
+        blas_size_out
+    );
 }
 
 } // namespace optix

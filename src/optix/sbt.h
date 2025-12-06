@@ -2,6 +2,8 @@
 
 #include "context.h"
 #include "pipeline.h"
+#include "neural_types.h"
+#include "vertex.h"  // Vertex struct definition
 #include <optix.h>
 #include <cuda_runtime.h>
 
@@ -25,7 +27,37 @@ struct EmptyData {};
 // Material data for hit groups
 struct MaterialData {
     float3_aligned albedo;
-    float roughness;  // For future use
+    float roughness;
+
+    // Neural network parameters (device pointer), nullptr for mesh instances
+    NeuralNetworkParams* neural_params;
+
+    // Triangle mesh data (device pointers), nullptr for neural assets
+    Vertex* vertex_buffer;   // Device pointer to vertex array
+    uint3* index_buffer;     // Device pointer to index array
+};
+
+// Instance metadata for SBT construction
+enum class GeometryType {
+    TRIANGLE_MESH,
+    NEURAL_ASSET
+};
+
+struct InstanceMetadata {
+    GeometryType type;
+    uint32_t instance_id;
+    uint32_t sbt_offset;
+
+    // For neural assets: pointer to device-side neural network parameters
+    NeuralNetworkParams* neural_params_device;
+
+    // For meshes: material properties
+    float3_aligned albedo;
+    float roughness;
+
+    // Triangle mesh buffers (device pointers), nullptr for neural assets
+    void* vertex_buffer;  // Device pointer to Vertex array
+    void* index_buffer;   // Device pointer to uint3 array
 };
 
 // Shader Binding Table manager
@@ -34,8 +66,8 @@ public:
     ShaderBindingTable(Context& context, Pipeline& pipeline);
     ~ShaderBindingTable();
 
-    // Build the SBT
-    bool build();
+    // Build the SBT with instance metadata
+    bool build(const std::vector<InstanceMetadata>& instances);
 
     // Get the OptiX SBT structure
     const OptixShaderBindingTable& get() const { return sbt_; }

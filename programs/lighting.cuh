@@ -3,6 +3,7 @@
 #include <optix.h>
 #include <cuda_runtime.h>
 #include "common.h"
+#include "divergence_profiling.cuh"
 
 // Helper to compute squared length
 __device__ __forceinline__ float length_squared(const float3& v) {
@@ -32,13 +33,15 @@ __device__ __forceinline__ float dot(const float3& a, const float3& b) {
 #endif
 
 // Compute direct lighting with shadow rays
+// div_shadow: optional pointer to accumulate shadow ray divergence
 __device__ float3 compute_direct_lighting(
     const float3& hit_pos,
     const float3& normal,
     const float3& albedo,
     const float3& light_pos,
     const float3& light_color,
-    OptixTraversableHandle traversable
+    OptixTraversableHandle traversable,
+    unsigned int* div_shadow = nullptr
 ) {
     // Vector to light
     const float3 to_light = make_float3(
@@ -56,9 +59,15 @@ __device__ float3 compute_direct_lighting(
     // Diffuse term (Lambertian)
     const float n_dot_l = fmaxf(0.0f, dot(normal, light_dir));
 
+    // Measure shadow ray divergence
+    bool should_trace_shadow = (n_dot_l > 0.0f);
+    if (div_shadow != nullptr) {
+        *div_shadow += measure_divergence(should_trace_shadow);
+    }
+
     // Trace shadow ray if surface faces light
-    float visibility = 1.0f;
-    if (n_dot_l > 0.0f) {
+    float visibility = 0.0f;
+    if (should_trace_shadow) {
         // Shadow ray payload: just visibility
         unsigned int p0 = __float_as_uint(1.0f);  // Default: visible
 

@@ -1,16 +1,12 @@
 #pragma once
 
 #include "context.h"
+#include "vertex.h"  // Vertex struct definition
 #include <optix.h>
 #include <cuda_runtime.h>
+#include <vector>
 
 namespace optix {
-
-// Vertex structure for triangle meshes
-struct Vertex {
-    float3 position;
-    float3 normal;
-};
 
 // Triangle geometry builder and manager
 class TriangleGeometry {
@@ -27,6 +23,21 @@ public:
     // Get BLAS buffers (must keep alive for rendering)
     void* get_floor_blas_buffer() const { return d_floor_blas_buffer_; }
     void* get_walls_blas_buffer() const { return d_walls_blas_buffer_; }
+
+    // Get vertex/index buffers for accessing mesh data in shaders
+    void* get_floor_vertex_buffer() const { return d_floor_vertices_; }
+    void* get_floor_index_buffer() const { return d_floor_indices_; }
+    void* get_walls_vertex_buffer() const { return d_wall_vertices_; }
+    void* get_walls_index_buffer() const { return d_wall_indices_; }
+
+        // Build BLAS for arbitrary mesh data (OBJ or other sources)
+    OptixTraversableHandle build_mesh_blas(
+        const std::vector<Vertex>& vertices,
+        const std::vector<uint3>& indices,
+        void** d_vertex_buffer_out,
+        void** d_index_buffer_out,
+        void** d_blas_buffer_out,
+        size_t* blas_size_out);
 
 private:
     Context& context_;
@@ -54,6 +65,7 @@ private:
         void** d_blas_buffer_out,
         size_t* blas_size_out
     );
+
 };
 
 } // namespace optix

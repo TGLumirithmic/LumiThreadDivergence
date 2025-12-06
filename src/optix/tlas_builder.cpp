@@ -30,7 +30,7 @@ TLASBuilder::~TLASBuilder() {
 void TLASBuilder::add_instance(
     OptixTraversableHandle blas,
     uint32_t instance_id,
-    uint32_t sbt_offset,
+    GeometryType geometry_type,
     const float transform[12],
     OptixInstanceFlags flags
 ) {
@@ -42,11 +42,12 @@ void TLASBuilder::add_instance(
     // Set BLAS handle
     instance.traversableHandle = blas;
 
-    // Set instance ID (used for geometry identification)
-    instance.instanceId = instance_id;
+    // Set instance ID (use the current instance index so it matches metadata and SBT record ordering)
+    uint32_t idx = static_cast<uint32_t>(instances_.size());
+    instance.instanceId = idx;
 
-    // Set SBT offset (routes to correct hit program)
-    instance.sbtOffset = sbt_offset;
+    // Set SBT offset to the instance index so each instance gets its own hitgroup record
+    instance.sbtOffset = idx*2;
 
     // Set visibility mask (all rays can hit this instance)
     instance.visibilityMask = 255;
@@ -56,9 +57,58 @@ void TLASBuilder::add_instance(
 
     instances_.push_back(instance);
 
-    std::cout << "Added instance " << instance_id
+    // Create default metadata (for backward compatibility)
+    InstanceMetadata metadata = {};
+    metadata.type = geometry_type;
+    metadata.instance_id = idx;
+    metadata.sbt_offset = idx*2;
+    metadata.neural_params_device = nullptr;
+    metadata.albedo = {0.8f, 0.8f, 0.8f};
+    metadata.roughness = 0.5f;
+    instance_metadata_.push_back(metadata);
+
+    std::cout << "Added instance " << instance.instanceId
               << " (BLAS=" << blas
-              << ", SBT offset=" << sbt_offset << ")" << std::endl;
+              << ", SBT offset=" << metadata.sbt_offset << ")" << std::endl;
+}
+
+void TLASBuilder::add_instance_with_metadata(
+    OptixTraversableHandle blas,
+    const InstanceMetadata& metadata,
+    const float transform[12],
+    OptixInstanceFlags flags
+) {
+    OptixInstance instance = {};
+
+    // Copy transform matrix (3x4 row-major)
+    std::memcpy(instance.transform, transform, 12 * sizeof(float));
+
+    // Set BLAS handle
+    instance.traversableHandle = blas;
+
+    // Set instance ID and sbtOffset to the current instance index so they line up with SBT records
+    uint32_t idx = static_cast<uint32_t>(instances_.size());
+    instance.instanceId = idx;
+    instance.sbtOffset = idx*2;
+
+    // Set visibility mask (all rays can hit this instance)
+    instance.visibilityMask = 255;
+
+    // Set flags
+    instance.flags = flags;
+
+    instances_.push_back(instance);
+    // Store metadata but ensure IDs/offsets match the chosen instance index
+    InstanceMetadata stored = metadata;
+    stored.instance_id = idx;
+    stored.sbt_offset = idx*2;
+    instance_metadata_.push_back(stored);
+
+    std::cout << "Added instance " << instance.instanceId
+              << " (BLAS=" << blas
+              << ", SBT offset=" << instance.sbtOffset
+              << ", type=" << (metadata.type == GeometryType::TRIANGLE_MESH ? "mesh" : "neural")
+              << ")" << std::endl;
 }
 
 OptixTraversableHandle TLASBuilder::build() {
@@ -148,6 +198,7 @@ OptixTraversableHandle TLASBuilder::build() {
 
 void TLASBuilder::clear() {
     instances_.clear();
+    instance_metadata_.clear();
 }
 
 } // namespace optix

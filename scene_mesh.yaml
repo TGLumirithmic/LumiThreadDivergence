@@ -1,0 +1,38 @@
+scene:
+  camera:
+    position: [3.0, 2.0, 5.0]
+    look_at: [0, 0, 0]
+    fov: 90
+
+  light:
+      type: point
+      position: [0, 5, 3]
+      color: [1, 1, 1]
+      intensity: 100.0
+
+  objects:
+    - type: mesh
+      file: "floor"
+    
+    - type: mesh
+      file: "walls"
+
+    - type: mesh
+      file: "data/obj/sphere.obj"
+      has_bounds: true
+      bounds:
+        min: [-1, -1, -1]
+        max: [1, 1, 1]
+      transform:
+        position: [0, 1, 0]
+        scale: [1, 1, 1]
+
+    - type: mesh
+      file: "data/obj/sphere.obj"
+      has_bounds: true
+      bounds:
+        min: [-1, -1, -1]
+        max: [1, 1, 1]
+      transform:
+        position: [3, 0.5, 0.5]
+        scale: [0.5, 0.5, 0.5]

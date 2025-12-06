@@ -2,6 +2,7 @@
 #include <optix_device.h>
 #include "common.h"
 #include "lighting.cuh"
+#include "divergence_profiling.cuh"
 
 extern "C" {
 __constant__ LaunchParams params;
@@ -9,6 +10,15 @@ __constant__ LaunchParams params;
 
 // Triangle closest-hit program (for primary rays)
 extern "C" __global__ void __closesthit__triangle() {
+    // Get material data from SBT
+    const MaterialData& mat = *(const MaterialData*)optixGetSbtDataPointer();
+
+    // Mark this ray as hitting triangle geometry (for program-type divergence measurement in raygen)
+    optixSetPayload_24(1);  // 1 = triangle geometry
+
+    // Mark instance ID for BLAS traversal divergence measurement
+    optixSetPayload_25(__float_as_uint((float)optixGetInstanceId()));
+
     // Get ray information
     const float3 ray_orig = optixGetWorldRayOrigin();
     const float3 ray_dir = optixGetWorldRayDirection();
@@ -21,28 +31,50 @@ extern "C" __global__ void __closesthit__triangle() {
         ray_orig.z + t_hit * ray_dir.z
     );
 
-    // For built-in triangle intersection, we need to compute the normal from the vertices
-    // Since we have hardcoded geometry, we can use the vertex normals directly
-    // For now, use a simple face-forward approach: if ray hits back face, flip normal
-    // The actual vertex normals are in the geometry, but we'll approximate with the face normal
-
-    // Get barycentric coordinates
+    // Get barycentric coordinates (u, v) where w = 1 - u - v
     const float2 barycentrics = optixGetTriangleBarycentrics();
+    const float u = barycentrics.x;
+    const float v = barycentrics.y;
+    const float w = 1.0f - u - v;
 
-    // For hardcoded geometry (floor and walls), we know the normals
-    // This is a simplification - in a real renderer we'd fetch vertex data
-    // Floor normal: (0, 1, 0), Wall normal: (0, 0, 1)
-    // For now, use the geometric normal from cross product of edges (approximation)
-    // Face-forward: flip if ray is coming from the back
-
-    // Simple approximation: use the ray direction to determine which surface we hit
+    // Interpolate vertex normals from mesh data
     float3 world_normal;
-    if (fabsf(hit_pos.y - (-1.0f)) < 0.1f) {
-        // Hit floor
-        world_normal = make_float3(0.0f, 1.0f, 0.0f);
+
+    if (mat.vertex_buffer != nullptr && mat.index_buffer != nullptr) {
+        // Get triangle index (which triangle in the mesh was hit)
+        const unsigned int prim_idx = optixGetPrimitiveIndex();
+
+        // Fetch triangle indices
+        const uint3 tri_indices = mat.index_buffer[prim_idx];
+
+        // Fetch vertex normals
+        const float3 n0 = mat.vertex_buffer[tri_indices.x].normal;
+        const float3 n1 = mat.vertex_buffer[tri_indices.y].normal;
+        const float3 n2 = mat.vertex_buffer[tri_indices.z].normal;
+
+        // Interpolate using barycentric coordinates
+        world_normal = make_float3(
+            w * n0.x + u * n1.x + v * n2.x,
+            w * n0.y + u * n1.y + v * n2.y,
+            w * n0.z + u * n1.z + v * n2.z
+        );
+
+        // Normalize (vertex normals may not be unit length after interpolation)
+        const float len = sqrtf(world_normal.x * world_normal.x +
+                                world_normal.y * world_normal.y +
+                                world_normal.z * world_normal.z);
+        if (len > 0.0f) {
+            world_normal.x /= len;
+            world_normal.y /= len;
+            world_normal.z /= len;
+        }
     } else {
-        // Hit wall
-        world_normal = make_float3(0.0f, 0.0f, 1.0f);
+        // Fallback to hardcoded normals (for cases where buffers aren't set)
+        if (fabsf(hit_pos.y - (-1.0f)) < 0.1f) {
+            world_normal = make_float3(0.0f, 1.0f, 0.0f);  // Floor
+        } else {
+            world_normal = make_float3(0.0f, 0.0f, 1.0f);  // Wall
+        }
     }
 
     // Face-forward: ensure normal faces the ray
@@ -65,6 +97,9 @@ extern "C" __global__ void __closesthit__triangle() {
         params.light.color.z * params.light.intensity
     );
 
+    // Get shadow divergence counter for passing to lighting function
+    unsigned int div_shadow = optixGetPayload_20();
+
     // Compute direct lighting with shadow rays
     float3 color = compute_direct_lighting(
         hit_pos,
@@ -72,8 +107,12 @@ extern "C" __global__ void __closesthit__triangle() {
         albedo,
         light_pos,
         light_color,
-        params.traversable
+        params.traversable,
+        &div_shadow
     );
+
+    // Update shadow divergence counter
+    optixSetPayload_20(div_shadow);
 
     // Clamp color to [0, 1]
     color.x = fminf(1.0f, fmaxf(0.0f, color.x));

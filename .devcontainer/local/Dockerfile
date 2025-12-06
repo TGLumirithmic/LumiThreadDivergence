@@ -94,6 +94,7 @@ RUN apt-get update && apt-get install -y \
     libxcursor-dev \
     libxi-dev \
     libomp-dev \
+    libyaml-cpp-dev \
     gdb \
     valgrind \
     clang-format \

@@ -31,6 +31,26 @@ set(TCNN_HALF_PRECISION 1)
 find_package(CUDAToolkit REQUIRED)
 
 # ============================================================
+# yaml-cpp integration (for Phase 4 scene loading)
+# ============================================================
+find_package(yaml-cpp REQUIRED)
+message(STATUS "yaml-cpp found and available")
+
+# ============================================================
+# tinyobjloader integration (for mesh loading from OBJ files)
+# ============================================================
+include(FetchContent)
+FetchContent_Declare(
+    tinyobjloader
+    GIT_REPOSITORY https://github.com/tinyobjloader/tinyobjloader.git
+    GIT_TAG v2.0.0rc13
+)
+set(TINYOBJLOADER_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(TINYOBJLOADER_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(tinyobjloader)
+message(STATUS "tinyobjloader fetched and made available")
+
+# ============================================================
 # OptiX SDK integration
 # ============================================================
 set(OptiX_INSTALL_DIR /opt/optix)
@@ -128,9 +148,12 @@ add_subdirectory(tests)
 # # Main renderer executable
 # # ============================================================
 add_executable(renderer src/main.cpp)
+target_include_directories(renderer PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(renderer
     neural_integration
     optix_host
+    yaml-cpp
+    tinyobjloader
     CUDA::nvrtc
     CUDA::cudart
     CUDA::cuda_driver
