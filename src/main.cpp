@@ -628,14 +628,36 @@ int main(int argc, char** argv) {
     launch_params.camera.position = { cam_pos.x, cam_pos.y, cam_pos.z };
     launch_params.camera.fov = fov;
 
-    // Camera basis vectors (looking toward origin)
+    // Camera basis vectors computed from look_at
     float aspect = (float)width / (float)height;
     float vfov = launch_params.camera.fov * M_PI / 180.0f;
     float vfov_size = std::tan(vfov / 2.0f);
 
-    launch_params.camera.u = {aspect * vfov_size, 0.0f, 0.0f};
-    launch_params.camera.v = {0.0f, vfov_size, 0.0f};
-    launch_params.camera.w = {0.0f, 0.0f, -1.0f};
+    // Compute camera coordinate system
+    float3 up = make_float3(0.0f, 1.0f, 0.0f);  // World up
+    float3 forward = make_float3(cam_look.x - cam_pos.x, cam_look.y - cam_pos.y, cam_look.z - cam_pos.z);
+
+    // Normalize forward (w points opposite to view direction)
+    float forward_len = std::sqrt(forward.x * forward.x + forward.y * forward.y + forward.z * forward.z);
+    float3 w = make_float3(forward.x / forward_len, forward.y / forward_len, forward.z / forward_len);
+
+    // Right vector (u) = up x w, then normalize
+    float3 u_raw = make_float3(up.y * w.z - up.z * w.y, up.z * w.x - up.x * w.z, up.x * w.y - up.y * w.x);
+    float u_len = std::sqrt(u_raw.x * u_raw.x + u_raw.y * u_raw.y + u_raw.z * u_raw.z);
+    float3 u_norm = make_float3(u_raw.x / u_len, u_raw.y / u_len, u_raw.z / u_len);
+
+    // Up vector (v) = w x u
+    float3 v_norm = make_float3(w.y * u_norm.z - w.z * u_norm.y, w.z * u_norm.x - w.x * u_norm.z, w.x * u_norm.y - w.y * u_norm.x);
+
+    // Scale by FOV and aspect ratio
+    launch_params.camera.u = {u_norm.x * aspect * vfov_size, u_norm.y * aspect * vfov_size, u_norm.z * aspect * vfov_size};
+    launch_params.camera.v = {v_norm.x * vfov_size, v_norm.y * vfov_size, v_norm.z * vfov_size};
+    launch_params.camera.w = {w.x, w.y, w.z};
+
+    std::cout << "Camera parameters:" << std::endl;
+    std::cout << "Camera u: " << "[ " << launch_params.camera.u.x << ", " << launch_params.camera.u.y << ", " << launch_params.camera.u.z << " ]" << std::endl;
+    std::cout << "Camera v: " << "[ " << launch_params.camera.v.x << ", " << launch_params.camera.v.y << ", " << launch_params.camera.v.z << " ]" << std::endl;
+    std::cout << "Camera w: " << "[ " << launch_params.camera.w.x << ", " << launch_params.camera.w.y << ", " << launch_params.camera.w.z << " ]" << std::endl;
 
     // Neural bounds
     launch_params.neural_bounds.min = {neural_min.x, neural_min.y, neural_min.z};
