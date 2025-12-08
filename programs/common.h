@@ -77,9 +77,8 @@ struct PointLight {
 struct LaunchParams {
     // Output buffers
     uchar4* frame_buffer;
-    uchar4* position_buffer;              // For hit_pos_normalized (quantized)
-    uchar4* direction_buffer;             // For normalized_dir (quantized)
-    float3_aligned* unnormalized_position_buffer; // For hit_pos (world space, full precision)
+    float3_aligned* hit_position_buffer;  // World-space hit position (full precision)
+    int32_t* instance_id_buffer;          // Instance ID per pixel (-1 for miss)
     uint32_t width;
     uint32_t height;
 

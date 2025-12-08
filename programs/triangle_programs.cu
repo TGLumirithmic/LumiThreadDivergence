@@ -14,10 +14,10 @@ extern "C" __global__ void __closesthit__triangle() {
     const MaterialData& mat = *(const MaterialData*)optixGetSbtDataPointer();
 
     // Mark this ray as hitting triangle geometry (for program-type divergence measurement in raygen)
-    optixSetPayload_24(1);  // 1 = triangle geometry
+    optixSetPayload_13(1);  // 1 = triangle geometry
 
     // Mark instance ID for BLAS traversal divergence measurement
-    optixSetPayload_25(__float_as_uint((float)optixGetInstanceId()));
+    optixSetPayload_14(__float_as_uint((float)optixGetInstanceId()));
 
     // Get ray information
     const float3 ray_orig = optixGetWorldRayOrigin();
@@ -98,7 +98,7 @@ extern "C" __global__ void __closesthit__triangle() {
     );
 
     // Get shadow divergence counter for passing to lighting function
-    unsigned int div_shadow = optixGetPayload_20();
+    unsigned int div_shadow = optixGetPayload_9();
 
     // Compute direct lighting with shadow rays
     float3 color = compute_direct_lighting(
@@ -112,7 +112,7 @@ extern "C" __global__ void __closesthit__triangle() {
     );
 
     // Update shadow divergence counter
-    optixSetPayload_20(div_shadow);
+    optixSetPayload_9(div_shadow);
 
     // Clamp color to [0, 1]
     color.x = fminf(1.0f, fmaxf(0.0f, color.x));
@@ -124,21 +124,10 @@ extern "C" __global__ void __closesthit__triangle() {
     optixSetPayload_1(__float_as_uint(color.y));
     optixSetPayload_2(__float_as_uint(color.z));
 
-    // Set hit position (normalized to [0, 1]³ for visualization)
-    // For triangles, just use world position directly
+    // Set world-space hit position (p3-p5)
     optixSetPayload_3(__float_as_uint(hit_pos.x));
     optixSetPayload_4(__float_as_uint(hit_pos.y));
     optixSetPayload_5(__float_as_uint(hit_pos.z));
-
-    // Set direction
-    optixSetPayload_6(__float_as_uint(ray_dir.x));
-    optixSetPayload_7(__float_as_uint(ray_dir.y));
-    optixSetPayload_8(__float_as_uint(ray_dir.z));
-
-    // Set unnormalized position (same as hit_pos for triangles)
-    optixSetPayload_14(__float_as_uint(hit_pos.x));
-    optixSetPayload_15(__float_as_uint(hit_pos.y));
-    optixSetPayload_16(__float_as_uint(hit_pos.z));
 }
 
 // Triangle intersection program (for custom primitives - not needed, using built-in)

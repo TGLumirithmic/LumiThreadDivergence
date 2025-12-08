@@ -71,34 +71,36 @@ extern "C" __global__ void __raygen__rg() {
     );
 
     // Trace ray
-    float3 payload_color = make_float3(0.0f, 0.0f, 0.0f);
-    float3 payload_hit_pos_normalized = make_float3(0.0f, 0.0f, 0.0f);
-    float3 payload_dir = make_float3(0.0f, 0.0f, 0.0f);
-    float3 payload_hit_pos_unnormalized = make_float3(0.0f, 0.0f, 0.0f);
+    // Payload layout (20 slots):
+    //   p0-p2:   Color (RGB)
+    //   p3-p5:   World-space hit position
+    //   p6-p12:  Divergence counters (7 slots)
+    //   p13:     Geometry type marker (0=miss, 1=triangle, 2=neural)
+    //   p14:     Instance ID (-1 for miss, 0+ for hit)
+    //   p15-p19: Neural inference cache (visibility, normal.xyz, depth)
 
-    unsigned int p0, p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11, p12, p13, p14, p15, p16;
+    float3 payload_color = make_float3(0.0f, 0.0f, 0.0f);
+    float3 payload_hit_pos = make_float3(0.0f, 0.0f, 0.0f);
+
+    unsigned int p0, p1, p2, p3, p4, p5;
     p0 = __float_as_uint(payload_color.x);
     p1 = __float_as_uint(payload_color.y);
     p2 = __float_as_uint(payload_color.z);
-    p3 = __float_as_uint(payload_hit_pos_normalized.x);
-    p4 = __float_as_uint(payload_hit_pos_normalized.y);
-    p5 = __float_as_uint(payload_hit_pos_normalized.z);
-    p6 = __float_as_uint(payload_dir.x);
-    p7 = __float_as_uint(payload_dir.y);
-    p8 = __float_as_uint(payload_dir.z);
-    p9 = __float_as_uint(payload_hit_pos_unnormalized.x);
-    p10 = __float_as_uint(payload_hit_pos_unnormalized.y);
-    p11 = __float_as_uint(payload_hit_pos_unnormalized.z);
-    p12 = p13 = p14 = p15 = p16 = 0;  // Neural inference cache slots
+    p3 = __float_as_uint(payload_hit_pos.x);
+    p4 = __float_as_uint(payload_hit_pos.y);
+    p5 = __float_as_uint(payload_hit_pos.z);
 
-    // Divergence profiling payload registers (p17-p23)
-    unsigned int p17 = 0, p18 = 0, p19 = 0, p20 = 0, p21 = 0, p22 = 0, p23 = 0;
+    // Divergence profiling payload registers (p6-p12)
+    unsigned int p6 = 0, p7 = 0, p8 = 0, p9 = 0, p10 = 0, p11 = 0, p12 = 0;
 
-    // Geometry type marker (p24): 0=miss, 1=triangle, 2=neural
-    unsigned int p24 = 0;
+    // Geometry type marker (p13): 0=miss, 1=triangle, 2=neural
+    unsigned int p13 = 0;
 
     // BLAS traversal: instance_id (-1 for miss, 0+ for hit)
-    unsigned int p25 = __float_as_uint(-1.0f);
+    unsigned int p14 = __float_as_uint(-1.0f);
+
+    // Neural inference cache slots (p15-p19)
+    unsigned int p15 = 0, p16 = 0, p17 = 0, p18 = 0, p19 = 0;
 
     optixTrace(
         params.traversable,
@@ -112,15 +114,14 @@ extern "C" __global__ void __raygen__rg() {
         0,                   // SBT offset
         1,                   // SBT stride
         0,                   // missSBTIndex
-        p0, p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11, p12, p13, p14, p15, p16,
-        p17, p18, p19, p20, p21, p22, p23, p24, p25);  // Divergence counters + geometry type + instance_id
+        p0, p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11, p12, p13, p14, p15, p16, p17, p18, p19);
 
     // Measure program-type divergence: neural vs triangle/miss
     // When rays in the same warp hit different geometry types, this measures the divergence
-    p19 += measure_divergence(p24 == 2);  // true=neural, false=triangle/miss
+    p8 += measure_divergence(p13 == 2);  // true=neural, false=triangle/miss (p8 = DIVERGENCE_CLOSESTHIT)
 
     // Measure BLAS traversal divergence
-    int instance_id = __float_as_int(__uint_as_float(p25));  // -1 for miss, 0+ for hit
+    int instance_id = __float_as_int(__uint_as_float(p14));  // -1 for miss, 0+ for hit
 
     // 1. Hit/Miss divergence - proxy for early BVH exit behavior
     unsigned maskHit = __ballot_sync(__activemask(), instance_id >= 0);
@@ -132,19 +133,13 @@ extern "C" __global__ void __raygen__rg() {
     float entropy = warpInstanceEntropy(instance_id);
     unsigned div_instance_entropy = (unsigned)(entropy * 1000.0f);  // Fixed-point encoding
 
-    // Retrieve color from payload
+    // Retrieve color and hit position from payload
     payload_color.x = __uint_as_float(p0);
     payload_color.y = __uint_as_float(p1);
     payload_color.z = __uint_as_float(p2);
-    payload_hit_pos_normalized.x = __uint_as_float(p3);
-    payload_hit_pos_normalized.y = __uint_as_float(p4);
-    payload_hit_pos_normalized.z = __uint_as_float(p5);
-    payload_dir.x = __uint_as_float(p6);
-    payload_dir.y = __uint_as_float(p7);
-    payload_dir.z = __uint_as_float(p8);
-    payload_hit_pos_unnormalized.x = __uint_as_float(p9);
-    payload_hit_pos_unnormalized.y = __uint_as_float(p10);
-    payload_hit_pos_unnormalized.z = __uint_as_float(p11);
+    payload_hit_pos.x = __uint_as_float(p3);
+    payload_hit_pos.y = __uint_as_float(p4);
+    payload_hit_pos.z = __uint_as_float(p5);
 
     // Convert to 8-bit color and write to frame buffer
     const uint32_t pixel_idx = y * params.width + x;
@@ -155,36 +150,24 @@ extern "C" __global__ void __raygen__rg() {
         255
     );
 
-    // Write hit position normalized (already normalized to [0,1])
-    params.position_buffer[pixel_idx] = make_uchar4(
-        (unsigned char)(fminf(fmaxf(payload_hit_pos_normalized.x, 0.0f), 1.0f) * 255.0f),
-        (unsigned char)(fminf(fmaxf(payload_hit_pos_normalized.y, 0.0f), 1.0f) * 255.0f),
-        (unsigned char)(fminf(fmaxf(payload_hit_pos_normalized.z, 0.0f), 1.0f) * 255.0f),
-        255
-    );
+    // Write world-space hit position (full precision)
+    params.hit_position_buffer[pixel_idx] = make_float3_aligned(payload_hit_pos);
 
-    // Write direction (scale from [-1,1] to [0,1] for visualization)
-    params.direction_buffer[pixel_idx] = make_uchar4(
-        (unsigned char)(fminf(fmaxf(payload_dir.x * 0.5f + 0.5f, 0.0f), 1.0f) * 255.0f),
-        (unsigned char)(fminf(fmaxf(payload_dir.y * 0.5f + 0.5f, 0.0f), 1.0f) * 255.0f),
-        (unsigned char)(fminf(fmaxf(payload_dir.z * 0.5f + 0.5f, 0.0f), 1.0f) * 255.0f),
-        255
-    );
-
-    // Write unnormalized hit position (full precision, world space)
-    params.unnormalized_position_buffer[pixel_idx] = make_float3_aligned(payload_hit_pos_unnormalized);
+    // Write instance ID (-1 for miss, 0+ for hit)
+    params.instance_id_buffer[pixel_idx] = instance_id;
 
     // Write divergence profiling metrics
+    // New payload mapping: p6-p12 are divergence counters
     if (params.divergence_buffer != nullptr) {
         const uint32_t base_idx = pixel_idx * NUM_DIVERGENCE_METRICS;
 
-        params.divergence_buffer[base_idx + DIVERGENCE_RAYGEN] = p17;
-        params.divergence_buffer[base_idx + DIVERGENCE_INTERSECTION] = p18;
-        params.divergence_buffer[base_idx + DIVERGENCE_CLOSESTHIT] = p19;
-        params.divergence_buffer[base_idx + DIVERGENCE_SHADOW] = p20;
-        params.divergence_buffer[base_idx + DIVERGENCE_HASH_ENCODING] = p21;
-        params.divergence_buffer[base_idx + DIVERGENCE_MLP_FORWARD] = p22;
-        params.divergence_buffer[base_idx + DIVERGENCE_EARLY_REJECT] = p23;
+        params.divergence_buffer[base_idx + DIVERGENCE_RAYGEN] = p6;
+        params.divergence_buffer[base_idx + DIVERGENCE_INTERSECTION] = p7;
+        params.divergence_buffer[base_idx + DIVERGENCE_CLOSESTHIT] = p8;
+        params.divergence_buffer[base_idx + DIVERGENCE_SHADOW] = p9;
+        params.divergence_buffer[base_idx + DIVERGENCE_HASH_ENCODING] = p10;
+        params.divergence_buffer[base_idx + DIVERGENCE_MLP_FORWARD] = p11;
+        params.divergence_buffer[base_idx + DIVERGENCE_EARLY_REJECT] = p12;
         params.divergence_buffer[base_idx + DIVERGENCE_HIT_MISS] = div_hit_miss;
         params.divergence_buffer[base_idx + DIVERGENCE_INSTANCE_ENTROPY] = div_instance_entropy;
     }

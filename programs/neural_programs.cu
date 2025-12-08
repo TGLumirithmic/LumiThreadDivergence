@@ -107,11 +107,11 @@ extern "C" __global__ void __intersection__neural() {
     const float3 aabb_min = make_float3(bounds.min.x, bounds.min.y, bounds.min.z);
     const float3 aabb_max = make_float3(bounds.max.x, bounds.max.y, bounds.max.z);
 
-    // Get divergence counters from payload
-    unsigned int div_intersection = optixGetPayload_18();
-    unsigned int div_hash = optixGetPayload_21();
-    unsigned int div_mlp = optixGetPayload_22();
-    unsigned int div_early_reject = optixGetPayload_23();
+    // Get divergence counters from payload (new layout: p6-p12)
+    unsigned int div_intersection = optixGetPayload_7();   // DIVERGENCE_INTERSECTION
+    unsigned int div_hash = optixGetPayload_10();          // DIVERGENCE_HASH_ENCODING
+    unsigned int div_mlp = optixGetPayload_11();           // DIVERGENCE_MLP_FORWARD
+    unsigned int div_early_reject = optixGetPayload_12();  // DIVERGENCE_EARLY_REJECT
 
     float t_near, t_far;
     bool hit_aabb = intersect_aabb(ray_orig, ray_dir, aabb_min, aabb_max, t_near, t_far);
@@ -160,17 +160,21 @@ extern "C" __global__ void __intersection__neural() {
             
             float depth = depth_normalised;// * 1.3f;
             float3 intersect_point = hit_pos + depth * ray_dir;
-            
-            optixSetPayload_9(__float_as_uint(intersect_point.x));
-            optixSetPayload_10(__float_as_uint(intersect_point.y));
-            optixSetPayload_11(__float_as_uint(intersect_point.z));
-            
-            // Cache neural inference results in payload for closest-hit
-            optixSetPayload_12(__float_as_uint(visibility));
-            optixSetPayload_13(__float_as_uint(predicted_normal.x));
-            optixSetPayload_14(__float_as_uint(predicted_normal.y));
-            optixSetPayload_15(__float_as_uint(predicted_normal.z));
-            optixSetPayload_16(__float_as_uint(depth));
+
+            // Transform from object space to world space
+            float3 world_intersect = optixTransformPointFromObjectToWorldSpace(intersect_point);
+
+            // Write world-space hit position to p3-p5 (consistent with triangle)
+            optixSetPayload_3(__float_as_uint(world_intersect.x));
+            optixSetPayload_4(__float_as_uint(world_intersect.y));
+            optixSetPayload_5(__float_as_uint(world_intersect.z));
+
+            // Cache neural inference results in payload for closest-hit (p15-p19)
+            optixSetPayload_15(__float_as_uint(visibility));
+            optixSetPayload_16(__float_as_uint(predicted_normal.x));
+            optixSetPayload_17(__float_as_uint(predicted_normal.y));
+            optixSetPayload_18(__float_as_uint(predicted_normal.z));
+            optixSetPayload_19(__float_as_uint(depth));
 
             // Report intersection at near point
             optixReportIntersection(
@@ -183,27 +187,27 @@ extern "C" __global__ void __intersection__neural() {
         // If visibility < 0.5, don't report intersection (early rejection)
     }
 
-    // Update divergence counters in payload
-    optixSetPayload_18(div_intersection);
-    optixSetPayload_21(div_hash);
-    optixSetPayload_22(div_mlp);
-    optixSetPayload_23(div_early_reject);
+    // Update divergence counters in payload (new layout)
+    optixSetPayload_7(div_intersection);   // DIVERGENCE_INTERSECTION
+    optixSetPayload_10(div_hash);          // DIVERGENCE_HASH_ENCODING
+    optixSetPayload_11(div_mlp);           // DIVERGENCE_MLP_FORWARD
+    optixSetPayload_12(div_early_reject);  // DIVERGENCE_EARLY_REJECT
 }
 
 // Closest-hit program for neural asset
 // Reads cached neural network inference results from payload
 extern "C" __global__ void __closesthit__neural() {
     // Mark this ray as hitting neural geometry (for program-type divergence measurement in raygen)
-    optixSetPayload_24(2);  // 2 = neural geometry
+    optixSetPayload_13(2);  // 2 = neural geometry
 
     // Mark instance ID for BLAS traversal divergence measurement
-    optixSetPayload_25(__float_as_uint((float)optixGetInstanceId()));
+    optixSetPayload_14(__float_as_uint((float)optixGetInstanceId()));
 
     // Get ray information
     const float3 ray_orig = optixGetWorldRayOrigin();
     const float3 ray_dir = optixGetWorldRayDirection();
     const float t_hit = __uint_as_float(optixGetAttribute_0());
-    const float depth = __uint_as_float(optixGetPayload_16());
+    const float depth = __uint_as_float(optixGetPayload_19());  // Neural cache: depth
 
     // Compute hit position
     const float3 hit_pos = ray_orig + (t_hit + depth) * ray_dir;
@@ -222,11 +226,12 @@ extern "C" __global__ void __closesthit__neural() {
     const float3 normalized_dir = normalize(ray_dir);
 
     // Read cached neural inference results from payload (computed in intersection program)
-    // const float visibility = __uint_as_float(optixGetPayload_12());
+    // Neural cache layout: p15=visibility, p16-p18=normal.xyz, p19=depth
+    // const float visibility = __uint_as_float(optixGetPayload_15());
     float3 predicted_normal;
-    predicted_normal.x = __uint_as_float(optixGetPayload_13());
-    predicted_normal.y = __uint_as_float(optixGetPayload_14());
-    predicted_normal.z = __uint_as_float(optixGetPayload_15());
+    predicted_normal.x = __uint_as_float(optixGetPayload_16());
+    predicted_normal.y = __uint_as_float(optixGetPayload_17());
+    predicted_normal.z = __uint_as_float(optixGetPayload_18());
 
     
 
@@ -279,7 +284,7 @@ extern "C" __global__ void __closesthit__neural() {
     );
 
     // Get shadow divergence counter for passing to lighting function
-    unsigned int div_shadow = optixGetPayload_20();
+    unsigned int div_shadow = optixGetPayload_9();  // DIVERGENCE_SHADOW
 
     float3 color = compute_direct_lighting(
         hit_pos,
@@ -292,7 +297,7 @@ extern "C" __global__ void __closesthit__neural() {
     );
 
     // Update shadow divergence counter
-    optixSetPayload_20(div_shadow);
+    optixSetPayload_9(div_shadow);
     // const float3 to_light = make_float3(
     //     light_pos.x - hit_pos.x,
     //     light_pos.y - hit_pos.y,
@@ -335,25 +340,13 @@ extern "C" __global__ void __closesthit__neural() {
     color.y = fminf(1.0f, fmaxf(0.0f, color.y));
     color.z = fminf(1.0f, fmaxf(0.0f, color.z));
 
-    // Set payload
+    // Set payload (color)
     optixSetPayload_0(__float_as_uint(color.x));
     optixSetPayload_1(__float_as_uint(color.y));
     optixSetPayload_2(__float_as_uint(color.z));
 
-    // Set hit position (normalized to [0,1]^3)
-    optixSetPayload_3(__float_as_uint(normalized_pos.x));
-    optixSetPayload_4(__float_as_uint(normalized_pos.y));
-    optixSetPayload_5(__float_as_uint(normalized_pos.z));
-
-    // Set direction (normalized to [-1,1]^3)
-    optixSetPayload_6(__float_as_uint(normalized_dir.x));
-    optixSetPayload_7(__float_as_uint(normalized_dir.y));
-    optixSetPayload_8(__float_as_uint(normalized_dir.z));
-
-    // // Set unnormalized hit position (world space)
-    // optixSetPayload_9(__float_as_uint(normalized_pos.x));
-    // optixSetPayload_10(__float_as_uint(normalized_pos.y));
-    // optixSetPayload_11(__float_as_uint(normalized_pos.z));
+    // World-space hit position (p3-p5) is already set by intersection program
+    // No need to overwrite - it contains the predicted surface point
 }
 
 // Any-hit program for neural asset (for shadow rays)

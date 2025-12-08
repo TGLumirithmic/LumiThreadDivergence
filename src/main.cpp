@@ -64,9 +64,8 @@ struct PointLight {
 // Launch parameters - must exactly match programs/common.h
 struct LaunchParams {
     uchar4* frame_buffer;
-    uchar4* position_buffer;
-    uchar4* direction_buffer;
-    float3_aligned* unnormalized_position_buffer;
+    float3_aligned* hit_position_buffer;  // World-space hit position (full precision)
+    int32_t* instance_id_buffer;          // Instance ID per pixel (-1 for miss)
     uint32_t width;
     uint32_t height;
     Camera camera;
@@ -394,13 +393,11 @@ int main(int argc, char** argv) {
 
     // Allocate frame buffers
     uchar4* d_frame_buffer = nullptr;
-    uchar4* d_position_buffer = nullptr;
-    uchar4* d_direction_buffer = nullptr;
-    float3_aligned* d_unnormalized_position_buffer = nullptr;
+    float3_aligned* d_hit_position_buffer = nullptr;
+    int32_t* d_instance_id_buffer = nullptr;
     CUDA_CHECK(cudaMalloc(&d_frame_buffer, width * height * sizeof(uchar4)));
-    CUDA_CHECK(cudaMalloc(&d_position_buffer, width * height * sizeof(uchar4)));
-    CUDA_CHECK(cudaMalloc(&d_direction_buffer, width * height * sizeof(uchar4)));
-    CUDA_CHECK(cudaMalloc(&d_unnormalized_position_buffer, width * height * sizeof(float3_aligned)));
+    CUDA_CHECK(cudaMalloc(&d_hit_position_buffer, width * height * sizeof(float3_aligned)));
+    CUDA_CHECK(cudaMalloc(&d_instance_id_buffer, width * height * sizeof(int32_t)));
 
     // Allocate divergence profiling buffer
     uint32_t* d_divergence_buffer = nullptr;
@@ -410,9 +407,8 @@ int main(int argc, char** argv) {
     // Set up launch parameters
     LaunchParams launch_params = {};
     launch_params.frame_buffer = d_frame_buffer;
-    launch_params.position_buffer = d_position_buffer;
-    launch_params.direction_buffer = d_direction_buffer;
-    launch_params.unnormalized_position_buffer = d_unnormalized_position_buffer;
+    launch_params.hit_position_buffer = d_hit_position_buffer;
+    launch_params.instance_id_buffer = d_instance_id_buffer;
     launch_params.width = width;
     launch_params.height = height;
     launch_params.divergence_buffer = d_divergence_buffer;
@@ -705,9 +701,8 @@ int main(int argc, char** argv) {
 
     // Download frame buffers
     std::vector<uchar4> h_frame_buffer(width * height);
-    std::vector<uchar4> h_position_buffer(width * height);
-    std::vector<uchar4> h_direction_buffer(width * height);
-    std::vector<float3_aligned> h_unnormalized_position_buffer(width * height);
+    std::vector<float3_aligned> h_hit_position_buffer(width * height);
+    std::vector<int32_t> h_instance_id_buffer(width * height);
 
     CUDA_CHECK(cudaMemcpy(
         h_frame_buffer.data(),
@@ -716,21 +711,15 @@ int main(int argc, char** argv) {
         cudaMemcpyDeviceToHost));
 
     CUDA_CHECK(cudaMemcpy(
-        h_position_buffer.data(),
-        d_position_buffer,
-        width * height * sizeof(uchar4),
-        cudaMemcpyDeviceToHost));
-
-    CUDA_CHECK(cudaMemcpy(
-        h_direction_buffer.data(),
-        d_direction_buffer,
-        width * height * sizeof(uchar4),
-        cudaMemcpyDeviceToHost));
-
-    CUDA_CHECK(cudaMemcpy(
-        h_unnormalized_position_buffer.data(),
-        d_unnormalized_position_buffer,
+        h_hit_position_buffer.data(),
+        d_hit_position_buffer,
         width * height * sizeof(float3_aligned),
+        cudaMemcpyDeviceToHost));
+
+    CUDA_CHECK(cudaMemcpy(
+        h_instance_id_buffer.data(),
+        d_instance_id_buffer,
+        width * height * sizeof(int32_t),
         cudaMemcpyDeviceToHost));
 
     // Download divergence profiling data
@@ -744,35 +733,37 @@ int main(int argc, char** argv) {
     // Write output images
     write_ppm(output_file, h_frame_buffer.data(), width, height);
 
-    // Generate filenames for position and direction
-    std::string pos_file = output_file;
-    std::string dir_file = output_file;
-    size_t dot_pos = pos_file.find_last_of('.');
+    // Write hit positions as binary file for analysis
+    std::string hit_pos_file = output_file;
+    size_t dot_pos = hit_pos_file.find_last_of('.');
     if (dot_pos != std::string::npos) {
-        pos_file = pos_file.substr(0, dot_pos) + "_position.ppm";
-        dir_file = dir_file.substr(0, dot_pos) + "_direction.ppm";
+        hit_pos_file = hit_pos_file.substr(0, dot_pos) + "_hit_position.bin";
     } else {
-        pos_file += "_position.ppm";
-        dir_file += "_direction.ppm";
+        hit_pos_file += "_hit_position.bin";
     }
 
-    write_ppm(pos_file, h_position_buffer.data(), width, height);
-    write_ppm(dir_file, h_direction_buffer.data(), width, height);
-
-    // Write unnormalized positions as binary file for analysis
-    std::string unnorm_file = output_file;
-    if (dot_pos != std::string::npos) {
-        unnorm_file = unnorm_file.substr(0, dot_pos) + "_position_unnormalized.bin";
-    } else {
-        unnorm_file += "_position_unnormalized.bin";
-    }
-
-    std::ofstream bin_file(unnorm_file, std::ios::binary);
+    std::ofstream bin_file(hit_pos_file, std::ios::binary);
     if (bin_file.is_open()) {
-        bin_file.write(reinterpret_cast<const char*>(h_unnormalized_position_buffer.data()),
+        bin_file.write(reinterpret_cast<const char*>(h_hit_position_buffer.data()),
                        width * height * sizeof(float3_aligned));
         bin_file.close();
-        std::cout << "Wrote unnormalized positions to: " << unnorm_file << std::endl;
+        std::cout << "Wrote hit positions to: " << hit_pos_file << std::endl;
+    }
+
+    // Write instance IDs as binary file for analysis
+    std::string instance_id_file = output_file;
+    if (dot_pos != std::string::npos) {
+        instance_id_file = instance_id_file.substr(0, dot_pos) + "_instance_id.bin";
+    } else {
+        instance_id_file += "_instance_id.bin";
+    }
+
+    std::ofstream instance_bin_file(instance_id_file, std::ios::binary);
+    if (instance_bin_file.is_open()) {
+        instance_bin_file.write(reinterpret_cast<const char*>(h_instance_id_buffer.data()),
+                                width * height * sizeof(int32_t));
+        instance_bin_file.close();
+        std::cout << "Wrote instance IDs to: " << instance_id_file << std::endl;
     }
 
     // Write divergence profiling metrics to binary file
@@ -798,9 +789,8 @@ int main(int argc, char** argv) {
 
     // Cleanup
     cudaFree(d_frame_buffer);
-    cudaFree(d_position_buffer);
-    cudaFree(d_direction_buffer);
-    cudaFree(d_unnormalized_position_buffer);
+    cudaFree(d_hit_position_buffer);
+    cudaFree(d_instance_id_buffer);
     cudaFree(d_divergence_buffer);
     cudaFree(d_launch_params);
     if (d_neural_array) cudaFree(d_neural_array);
