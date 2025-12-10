@@ -1,0 +1,157 @@
+scene:
+  camera:
+    position: [4.095760221444959, 7.735764363510461, 7.0940647991622265]
+    look_at: [0.0, 2.0, 0.0]
+    fov: 90
+  light:
+    type: point
+    position: [0.0, 5.0, 3.0]
+    color: [1.0, 1.0, 1.0]
+    intensity: 100.0
+  objects:
+  - {type: mesh, file: data/obj/floor.obj}
+  - {type: mesh, file: data/obj/walls.obj}
+  - type: neural_asset
+    has_bounds: true
+    bounds:
+      min: [-1.0, -1.0, -1.0]
+      max: [1.0, 1.0, 1.0]
+    transform:
+      position: [0.7910755566861711, 2.3898405076327993, 0.7818433178375717]
+      scale: [0.3883898525813863, 0.3883898525813863, 0.3883898525813863]
+    weights: data/models/weights.bin
+  - type: neural_asset
+    has_bounds: true
+    bounds:
+      min: [-1.0, -1.0, -1.0]
+      max: [1.0, 1.0, 1.0]
+    transform:
+      position: [-0.40319036585981227, 1.4343487999934459, -2.179377139918143]
+      scale: [0.404720909248234, 0.404720909248234, 0.404720909248234]
+    weights: data/models/weights.bin
+  - type: neural_asset
+    has_bounds: true
+    bounds:
+      min: [-1.0, -1.0, -1.0]
+      max: [1.0, 1.0, 1.0]
+    transform:
+      position: [-1.0720375031497902, 0.37940947104071926, -2.418604811101253]
+      scale: [0.35048918176689403, 0.35048918176689403, 0.35048918176689403]
+    weights: data/models/weights.bin
+  - type: neural_asset
+    has_bounds: true
+    bounds:
+      min: [-1.0, -1.0, -1.0]
+      max: [1.0, 1.0, 1.0]
+    transform:
+      position: [4.117190880219955, 2.550284196719682, 3.4257952307461332]
+      scale: [0.3905589047050337, 0.3905589047050337, 0.3905589047050337]
+    weights: data/models/weights.bin
+  - type: neural_asset
+    has_bounds: true
+    bounds:
+      min: [-1.0, -1.0, -1.0]
+      max: [1.0, 1.0, 1.0]
+    transform:
+      position: [3.0367873313988705, 0.5056237849114663, 0.8042080875043098]
+      scale: [0.4459673645969056, 0.4459673645969056, 0.4459673645969056]
+    weights: data/models/weights.bin
+  - type: neural_asset
+    has_bounds: true
+    bounds:
+      min: [-1.0, -1.0, -1.0]
+      max: [1.0, 1.0, 1.0]
+    transform:
+      position: [-2.4117846645398067, 2.5165877091839883, -2.8121298307887814]
+      scale: [0.3927779628546369, 0.3927779628546369, 0.3927779628546369]
+    weights: data/models/weights.bin
+  - type: neural_asset
+    has_bounds: true
+    bounds:
+      min: [-1.0, -1.0, -1.0]
+      max: [1.0, 1.0, 1.0]
+    transform:
+      position: [-4.073337378409465, 1.418650535468362, 2.190541469023974]
+      scale: [0.30687365754834933, 0.30687365754834933, 0.30687365754834933]
+    weights: data/models/weights.bin
+  - type: neural_asset
+    has_bounds: true
+    bounds:
+      min: [-1.0, -1.0, -1.0]
+      max: [1.0, 1.0, 1.0]
+    transform:
+      position: [-1.0627311236753925, 0.4266951577623011, 0.3613949837089798]
+      scale: [0.3349186329541545, 0.3349186329541545, 0.3349186329541545]
+    weights: data/models/weights.bin
+  - type: neural_asset
+    has_bounds: true
+    bounds:
+      min: [-1.0, -1.0, -1.0]
+      max: [1.0, 1.0, 1.0]
+    transform:
+      position: [-0.3406300416889597, 2.4155971671903336, -3.94475642305337]
+      scale: [0.35472482684551265, 0.35472482684551265, 0.35472482684551265]
+    weights: data/models/weights.bin
+  - type: neural_asset
+    has_bounds: true
+    bounds:
+      min: [-1.0, -1.0, -1.0]
+      max: [1.0, 1.0, 1.0]
+    transform:
+      position: [3.696365979520187, 1.5129869851308966, -0.8064788467592261]
+      scale: [0.44049818815687414, 0.44049818815687414, 0.44049818815687414]
+    weights: data/models/weights.bin
+  - type: neural_asset
+    has_bounds: true
+    bounds:
+      min: [-1.0, -1.0, -1.0]
+      max: [1.0, 1.0, 1.0]
+    transform:
+      position: [-0.8464065051409644, 0.4781498570315348, 4.564286447121885]
+      scale: [0.40936901969255235, 0.40936901969255235, 0.40936901969255235]
+    weights: data/models/weights.bin
+  - type: neural_asset
+    has_bounds: true
+    bounds:
+      min: [-1.0, -1.0, -1.0]
+      max: [1.0, 1.0, 1.0]
+    transform:
+      position: [3.4780616196155094, 0.5383997775062009, -2.462032295457285]
+      scale: [0.39599996397811393, 0.39599996397811393, 0.39599996397811393]
+    weights: data/models/weights.bin
+  - type: neural_asset
+    has_bounds: true
+    bounds:
+      min: [-1.0, -1.0, -1.0]
+      max: [1.0, 1.0, 1.0]
+    transform:
+      position: [-4.01085766830804, 0.421767148364508, -0.4614658097904917]
+      scale: [0.41639998673193673, 0.41639998673193673, 0.41639998673193673]
+    weights: data/models/weights.bin
+  - type: neural_asset
+    has_bounds: true
+    bounds:
+      min: [-1.0, -1.0, -1.0]
+      max: [1.0, 1.0, 1.0]
+    transform:
+      position: [-0.7667657155416465, 1.6415883752657572, 4.331840812958422]
+      scale: [0.3401611313963554, 0.3401611313963554, 0.3401611313963554]
+    weights: data/models/weights.bin
+  - type: neural_asset
+    has_bounds: true
+    bounds:
+      min: [-1.0, -1.0, -1.0]
+      max: [1.0, 1.0, 1.0]
+    transform:
+      position: [3.7435250855359317, 2.4681054600834247, -2.239371275151415]
+      scale: [0.3472016821197717, 0.3472016821197717, 0.3472016821197717]
+    weights: data/models/weights.bin
+  - type: neural_asset
+    has_bounds: true
+    bounds:
+      min: [-1.0, -1.0, -1.0]
+      max: [1.0, 1.0, 1.0]
+    transform:
+      position: [-0.6102953268839338, 1.4335291343243841, 0.15929190209743394]
+      scale: [0.36882777788810983, 0.36882777788810983, 0.36882777788810983]
+    weights: data/models/weights.bin

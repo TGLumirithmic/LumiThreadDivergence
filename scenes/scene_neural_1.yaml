@@ -1,0 +1,22 @@
+scene:
+  camera:
+    position: [4.095760221444959, 7.735764363510461, 7.0940647991622265]
+    look_at: [0.0, 2.0, 0.0]
+    fov: 90
+  light:
+    type: point
+    position: [0.0, 5.0, 3.0]
+    color: [1.0, 1.0, 1.0]
+    intensity: 100.0
+  objects:
+  - {type: mesh, file: data/obj/floor.obj}
+  - {type: mesh, file: data/obj/walls.obj}
+  - type: neural_asset
+    has_bounds: true
+    bounds:
+      min: [-1.0, -1.0, -1.0]
+      max: [1.0, 1.0, 1.0]
+    transform:
+      position: [-3.827085111518145, 1.2621601577603423, -2.230147471139726]
+      scale: [0.9713981383807779, 0.9713981383807779, 0.9713981383807779]
+    weights: data/models/weights.bin
