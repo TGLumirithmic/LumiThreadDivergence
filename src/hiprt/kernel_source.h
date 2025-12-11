@@ -684,6 +684,33 @@ __device__ bool intersectNeuralAABB(
 }
 
 // ============================================================================
+// Pastel Color Map for Instance Coloring
+// ============================================================================
+
+__device__ __forceinline__ float3 getPastelColor(uint32_t instanceID) {
+    // 16 distinct pastel colors
+    const float3 pastel_colors[16] = {
+        make_float3(0.98f, 0.68f, 0.68f),  // Pastel red
+        make_float3(0.68f, 0.85f, 0.98f),  // Pastel blue
+        make_float3(0.68f, 0.98f, 0.76f),  // Pastel green
+        make_float3(0.98f, 0.92f, 0.68f),  // Pastel yellow
+        make_float3(0.88f, 0.68f, 0.98f),  // Pastel purple
+        make_float3(0.98f, 0.82f, 0.68f),  // Pastel orange
+        make_float3(0.68f, 0.98f, 0.98f),  // Pastel cyan
+        make_float3(0.98f, 0.68f, 0.88f),  // Pastel pink
+        make_float3(0.78f, 0.98f, 0.68f),  // Pastel lime
+        make_float3(0.98f, 0.78f, 0.82f),  // Pastel coral
+        make_float3(0.68f, 0.78f, 0.98f),  // Pastel periwinkle
+        make_float3(0.88f, 0.98f, 0.68f),  // Pastel chartreuse
+        make_float3(0.98f, 0.68f, 0.78f),  // Pastel rose
+        make_float3(0.68f, 0.98f, 0.88f),  // Pastel mint
+        make_float3(0.92f, 0.68f, 0.98f),  // Pastel lavender
+        make_float3(0.98f, 0.88f, 0.78f),  // Pastel peach
+    };
+    return pastel_colors[instanceID % 16];
+}
+
+// ============================================================================
 // Camera Parameters
 // ============================================================================
 
@@ -925,6 +952,9 @@ extern "C" __global__ void renderKernel(
             normal = make_float3(0.0f, 1.0f, 0.0f);
         }
 
+        // Get pastel diffuse color based on instance ID
+        float3 diffuse_color = getPastelColor(hit.instanceID);
+
         // Simple diffuse shading
         float shadow_factor = in_shadow ? 0.3f : 1.0f;
         float ndotl = fmaxf(0.0f, normal.x * light_dir.x +
@@ -935,10 +965,11 @@ extern "C" __global__ void renderKernel(
         float attenuation = (light.intensity) / (light_dist * light_dist + 1.0f) / 10.0f;
         float diffuse = ndotl * shadow_factor * attenuation;
 
+        // Combine diffuse color with light color
         color = make_float3(
-            fminf(diffuse * light.color.x, 1.0f),
-            fminf(diffuse * light.color.y, 1.0f),
-            fminf(diffuse * light.color.z, 1.0f)
+            fminf(diffuse * diffuse_color.x * light.color.x, 1.0f),
+            fminf(diffuse * diffuse_color.y * light.color.y, 1.0f),
+            fminf(diffuse * diffuse_color.z * light.color.z, 1.0f)
         );
     } else {
         // Background color

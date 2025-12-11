@@ -32,8 +32,8 @@
 #include "neural/weight_loader.h"
 #include "neural/config.h"
 
-// Divergence metric count (must match kernel_source.h)
-#define NUM_DIVERGENCE_METRICS 11
+// Divergence metric count for output (11 uint32 fields + instance_entropy as fixed-point = 12 total)
+#define NUM_DIVERGENCE_METRICS 12
 
 // =============================================================================
 // Neural Network Types (must match kernel_source.h exactly)
@@ -585,14 +585,29 @@ int main(int argc, char** argv) {
     std::string output_file = "output/hiprt_render.ppm";
     int width = 512;
     int height = 512;
+    bool enable_divergence = true;
 
-    if (argc > 1) scene_file = argv[1];
-    if (argc > 2) output_file = argv[2];
-    if (argc > 3) width = std::atoi(argv[3]);
-    if (argc > 4) height = std::atoi(argv[4]);
+    // Parse positional and flag arguments
+    int positional_idx = 0;
+    for (int i = 1; i < argc; ++i) {
+        std::string arg = argv[i];
+        if (arg == "--no-divergence" || arg == "-D") {
+            enable_divergence = false;
+        } else {
+            // Positional arguments: scene, output, width, height
+            switch (positional_idx) {
+                case 0: scene_file = arg; break;
+                case 1: output_file = arg; break;
+                case 2: width = std::atoi(arg.c_str()); break;
+                case 3: height = std::atoi(arg.c_str()); break;
+            }
+            positional_idx++;
+        }
+    }
 
     if (scene_file.empty()) {
-        std::cerr << "Usage: " << argv[0] << " <scene.yaml> [output.ppm] [width] [height]" << std::endl;
+        std::cerr << "Usage: " << argv[0] << " <scene.yaml> [output.ppm] [width] [height] [--no-divergence|-D]" << std::endl;
+        std::cerr << "  --no-divergence, -D  Disable divergence measurement output" << std::endl;
         return 1;
     }
 
@@ -600,6 +615,7 @@ int main(int argc, char** argv) {
     std::cout << "  Scene file: " << scene_file << std::endl;
     std::cout << "  Output: " << output_file << std::endl;
     std::cout << "  Resolution: " << width << "x" << height << std::endl;
+    std::cout << "  Divergence measurement: " << (enable_divergence ? "enabled" : "disabled") << std::endl;
 
     // Load YAML scene
     YAML::Node root;
@@ -915,12 +931,14 @@ int main(int argc, char** argv) {
     size_t frame_buffer_size = width * height * 4;  // RGBA
     ORO_CHECK(oroMalloc(&d_frame_buffer, frame_buffer_size));
 
-    // Allocate metrics buffer
+    // Allocate metrics buffer (only if divergence measurement is enabled)
     void* d_metrics_buffer = nullptr;
-    // TraversalMetrics has 11 uint32_t fields + 1 float (12 * 4 = 48 bytes)
-    size_t metrics_size = width * height * 48;
-    ORO_CHECK(oroMalloc(&d_metrics_buffer, metrics_size));
-    ORO_CHECK(oroMemset((oroDeviceptr)d_metrics_buffer, 0, metrics_size));
+    if (enable_divergence) {
+        // TraversalMetrics has 11 uint32_t fields + 1 float (12 * 4 = 48 bytes)
+        size_t metrics_size = width * height * 48;
+        ORO_CHECK(oroMalloc(&d_metrics_buffer, metrics_size));
+        ORO_CHECK(oroMemset((oroDeviceptr)d_metrics_buffer, 0, metrics_size));
+    }
 
     // Set up camera
     Camera camera;
@@ -1155,6 +1173,97 @@ int main(int argc, char** argv) {
 
     std::cout << "Rendering complete!" << std::endl;
 
+    // Download and output divergence metrics (if enabled)
+    if (enable_divergence && d_metrics_buffer) {
+        std::vector<TraversalMetrics> h_metrics(width * height);
+        ORO_CHECK(oroMemcpyDtoH(h_metrics.data(), (oroDeviceptr)d_metrics_buffer,
+                               width * height * sizeof(TraversalMetrics)));
+
+        // Write divergence metrics to binary file
+        std::string div_file = output_file;
+        size_t dot_pos = div_file.rfind('.');
+        if (dot_pos != std::string::npos) {
+            div_file = div_file.substr(0, dot_pos) + "_divergence.bin";
+        } else {
+            div_file += "_divergence.bin";
+        }
+
+        std::ofstream div_bin_file(div_file, std::ios::binary);
+        if (div_bin_file.is_open()) {
+            // Write header: [width, height, num_metrics]
+            // NUM_DIVERGENCE_METRICS = 12 (11 uint32 fields + instance_entropy as fixed-point ×1000)
+            uint32_t header[3] = {(uint32_t)width, (uint32_t)height, NUM_DIVERGENCE_METRICS};
+            div_bin_file.write(reinterpret_cast<const char*>(header), 3 * sizeof(uint32_t));
+
+            // Write metrics as flat uint32 array (compatible with analyze_divergence.py)
+            // Convert instance_entropy float to fixed-point (×1000) as expected by the script
+            std::vector<uint32_t> flat_metrics(width * height * NUM_DIVERGENCE_METRICS);
+            for (int i = 0; i < width * height; ++i) {
+                const auto& m = h_metrics[i];
+                uint32_t* out = &flat_metrics[i * NUM_DIVERGENCE_METRICS];
+                out[0]  = m.traversal_steps;
+                out[1]  = m.node_divergence;
+                out[2]  = m.triangle_tests;
+                out[3]  = m.triangle_divergence;
+                out[4]  = m.neural_tests;
+                out[5]  = m.neural_divergence;
+                out[6]  = m.early_reject_divergence;
+                out[7]  = m.hash_divergence;
+                out[8]  = m.mlp_divergence;
+                out[9]  = m.shadow_tests;
+                out[10] = m.shadow_divergence;
+                out[11] = (uint32_t)(m.instance_entropy * 1000.0f);  // Fixed-point ×1000
+            }
+            div_bin_file.write(reinterpret_cast<const char*>(flat_metrics.data()),
+                               flat_metrics.size() * sizeof(uint32_t));
+            div_bin_file.close();
+            std::cout << "Wrote divergence metrics to: " << div_file << std::endl;
+        }
+
+        // Print divergence summary statistics
+        uint64_t total_traversal_steps = 0;
+        uint64_t total_node_divergence = 0;
+        uint64_t total_triangle_tests = 0;
+        uint64_t total_triangle_divergence = 0;
+        uint64_t total_neural_tests = 0;
+        uint64_t total_neural_divergence = 0;
+        uint64_t total_early_reject_divergence = 0;
+        uint64_t total_hash_divergence = 0;
+        uint64_t total_mlp_divergence = 0;
+        uint64_t total_shadow_tests = 0;
+        uint64_t total_shadow_divergence = 0;
+        double total_instance_entropy = 0.0;
+
+        for (const auto& m : h_metrics) {
+            total_traversal_steps += m.traversal_steps;
+            total_node_divergence += m.node_divergence;
+            total_triangle_tests += m.triangle_tests;
+            total_triangle_divergence += m.triangle_divergence;
+            total_neural_tests += m.neural_tests;
+            total_neural_divergence += m.neural_divergence;
+            total_early_reject_divergence += m.early_reject_divergence;
+            total_hash_divergence += m.hash_divergence;
+            total_mlp_divergence += m.mlp_divergence;
+            total_shadow_tests += m.shadow_tests;
+            total_shadow_divergence += m.shadow_divergence;
+            total_instance_entropy += m.instance_entropy;
+        }
+
+        std::cout << "\n=== Divergence Metrics Summary ===" << std::endl;
+        std::cout << "  Traversal steps:        " << total_traversal_steps << std::endl;
+        std::cout << "  Node divergence:        " << total_node_divergence << std::endl;
+        std::cout << "  Triangle tests:         " << total_triangle_tests << std::endl;
+        std::cout << "  Triangle divergence:    " << total_triangle_divergence << std::endl;
+        std::cout << "  Neural tests:           " << total_neural_tests << std::endl;
+        std::cout << "  Neural divergence:      " << total_neural_divergence << std::endl;
+        std::cout << "  Early reject div:       " << total_early_reject_divergence << std::endl;
+        std::cout << "  Hash divergence:        " << total_hash_divergence << std::endl;
+        std::cout << "  MLP divergence:         " << total_mlp_divergence << std::endl;
+        std::cout << "  Shadow tests:           " << total_shadow_tests << std::endl;
+        std::cout << "  Shadow divergence:      " << total_shadow_divergence << std::endl;
+        std::cout << "  Avg instance entropy:   " << (total_instance_entropy / (width * height)) << std::endl;
+    }
+
     // Download and save image
     std::vector<unsigned char> h_frame_buffer(frame_buffer_size);
     ORO_CHECK(oroMemcpyDtoH(h_frame_buffer.data(), (oroDeviceptr)d_frame_buffer, frame_buffer_size));
@@ -1164,7 +1273,7 @@ int main(int argc, char** argv) {
     // Cleanup
     oroStreamDestroy(stream);
     oroFree((oroDeviceptr)d_frame_buffer);
-    oroFree((oroDeviceptr)d_metrics_buffer);
+    if (d_metrics_buffer) oroFree((oroDeviceptr)d_metrics_buffer);
 
     // Free mesh normal data GPU buffers
     for (const auto& gpu : gpu_mesh_data) {
