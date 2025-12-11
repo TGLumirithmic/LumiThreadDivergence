@@ -46,14 +46,18 @@ CompiledKernel KernelCompiler::compile(
         fn.filterFuncName = nullptr;
     }
 
-    // Set custom intersection function for neural geometry (geomType = 1)
-    // Apply to all ray types
+    // Set custom intersection function for neural/custom geometry (geomType = 1)
+    // Apply to all ray types. Neural assets use geomType=1 (GEOM_TYPE_NEURAL)
+    // while triangles use geomType=0 (GEOM_TYPE_TRIANGLE) with built-in intersection
     if (intersect_func_name) {
         for (uint32_t ray_type = 0; ray_type < num_ray_types; ++ray_type) {
-            // Neural geometry type is 1
-            uint32_t index = ray_type * num_geom_types + 1;
+            // Custom geometry type is 1 (GEOM_TYPE_NEURAL)
+            uint32_t custom_geom_type = 1;
+            uint32_t index = ray_type * num_geom_types + custom_geom_type;
             func_name_sets[index].intersectFuncName = intersect_func_name;
             func_name_sets[index].filterFuncName = filter_func_name;
+            std::cout << "  Setting funcNameSet[" << index << "] = " << intersect_func_name
+                      << " (rayType=" << ray_type << ", geomType=" << custom_geom_type << ")" << std::endl;
         }
     }
 
@@ -125,6 +129,9 @@ CompiledKernel KernelCompiler::compile(
     hiprtFuncTable func_table = nullptr;
 
     if (intersect_func_name || filter_func_name) {
+        std::cout << "Creating function table (" << num_geom_types << " geomTypes x "
+                  << num_ray_types << " rayTypes)..." << std::endl;
+
         HIPRT_CHECK(hiprtCreateFuncTable(
             context_.get_context(),
             num_geom_types,
@@ -132,8 +139,31 @@ CompiledKernel KernelCompiler::compile(
             func_table
         ));
 
-        // The function table data sets are set when launching the kernel
-        // via the payload mechanism (intersectFuncData points to user data)
+        std::cout << "  Function table created: " << (void*)func_table << std::endl;
+
+        // Set empty data for all geomType/rayType combinations
+        // The actual data (payload) is passed through the traversal, not here
+        // But we still need to initialize the function table entries
+        // NOTE: Caller should override geomType=1 entries with actual AABB data!
+        for (uint32_t ray_type = 0; ray_type < num_ray_types; ++ray_type) {
+            for (uint32_t geom_type = 0; geom_type < num_geom_types; ++geom_type) {
+                hiprtFuncDataSet data_set;
+                data_set.intersectFuncData = nullptr;  // Data comes from traversal payload
+                data_set.filterFuncData = nullptr;
+
+                std::cout << "  hiprtSetFuncTable(geomType=" << geom_type << ", rayType=" << ray_type
+                          << ", intersectFuncData=nullptr) [INIT]" << std::endl;
+
+                HIPRT_CHECK(hiprtSetFuncTable(
+                    context_.get_context(),
+                    func_table,
+                    geom_type,
+                    ray_type,
+                    data_set
+                ));
+            }
+        }
+        std::cout << "  Function table initialized (caller should set actual data for custom geomTypes)" << std::endl;
     }
 
     return CompiledKernel(function, func_table, module, &context_);

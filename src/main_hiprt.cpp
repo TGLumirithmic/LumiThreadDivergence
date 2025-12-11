@@ -15,6 +15,8 @@
 #include <algorithm>
 #include <cctype>
 #include <memory>
+#include <cstring>
+#include <limits>
 
 #include <yaml-cpp/yaml.h>
 #include <tiny_obj_loader.h>
@@ -32,6 +34,389 @@
 
 // Divergence metric count (must match kernel_source.h)
 #define NUM_DIVERGENCE_METRICS 11
+
+// =============================================================================
+// Neural Network Types (must match kernel_source.h exactly)
+// =============================================================================
+
+// Forward declarations for kernel-side types (used in NeuralAssetData)
+struct HashGridParams {
+    float* hash_table;
+    uint32_t* offset_table;
+    uint32_t n_levels;
+    uint32_t n_features_per_level;
+    uint32_t log2_hashmap_size;
+    float base_resolution;
+    float per_level_scale;
+};
+
+struct MLPLayer {
+    float* weights;
+    float* biases;
+    uint32_t in_dim;
+    uint32_t out_dim;
+};
+
+struct MLPParams {
+    MLPLayer* layers;
+    uint32_t n_layers;
+    const char* output_activation;
+};
+
+struct NeuralNetworkParams {
+    HashGridParams hash_encoding;
+    MLPParams direction_encoder;
+    MLPParams visibility_decoder;
+    MLPParams normal_decoder;
+    MLPParams depth_decoder;
+    float* scratch_buffer;
+    uint32_t scratch_buffer_size;
+};
+
+// Forward declare float3 equivalent for NeuralAssetData
+struct float3_kernel {
+    float x, y, z;
+};
+
+// This must match TraversalMetrics in kernel_source.h
+struct TraversalMetrics {
+    uint32_t traversal_steps;
+    uint32_t node_divergence;
+    uint32_t triangle_tests;
+    uint32_t triangle_divergence;
+    uint32_t neural_tests;
+    uint32_t neural_divergence;
+    uint32_t early_reject_divergence;
+    uint32_t hash_divergence;
+    uint32_t mlp_divergence;
+    uint32_t shadow_tests;
+    uint32_t shadow_divergence;
+    float instance_entropy;
+};
+
+struct NeuralAssetData {
+    float3_kernel* aabb_min;
+    float3_kernel* aabb_max;
+    NeuralNetworkParams* neural_params;
+    uint32_t num_assets;
+    int32_t* instance_to_neural_idx;
+    uint32_t max_instance_id;
+    TraversalMetrics* metrics;
+};
+
+// =============================================================================
+// Orochi-based Neural Weight Loader (adapted from optix::NeuralNetworkParamsHost)
+// =============================================================================
+
+static uint32_t next_multiple(uint32_t val, uint32_t divisor) {
+    return ((val + divisor - 1) / divisor) * divisor;
+}
+
+static uint32_t powi(uint32_t base, uint32_t exp) {
+    uint32_t result = 1;
+    for (uint32_t i = 0; i < exp; ++i) {
+        result *= base;
+    }
+    return result;
+}
+
+static float grid_scale(uint32_t level, float log2_per_level_scale, float base_resolution) {
+    return std::exp2(level * log2_per_level_scale) * base_resolution - 1.0f;
+}
+
+static uint32_t grid_resolution(float scale) {
+    return (uint32_t)std::ceil(scale) + 1;
+}
+
+// Host-side container for neural network parameters using Orochi API
+class NeuralNetworkParamsOrochi {
+public:
+    NeuralNetworkParamsOrochi(const neural::NetworkConfig& config) : config_(config) {
+        std::memset(&d_params_, 0, sizeof(NeuralNetworkParams));
+        // Allocate activation strings on device
+        d_relu_str_ = allocate_string("ReLU");
+        d_sigmoid_str_ = allocate_string("Sigmoid");
+        d_none_str_ = allocate_string("None");
+    }
+
+    ~NeuralNetworkParamsOrochi() {
+        free_device_memory();
+    }
+
+    bool load_from_weights(const neural::WeightLoader& loader);
+    const NeuralNetworkParams& get_device_params() const { return d_params_; }
+    bool is_loaded() const { return loaded_; }
+
+private:
+    neural::NetworkConfig config_;
+    bool loaded_ = false;
+    NeuralNetworkParams d_params_;
+
+    // Device memory tracking
+    float* d_hash_table_ = nullptr;
+    uint32_t* d_hash_offsets_ = nullptr;
+    size_t hash_table_size_ = 0;
+
+    MLPLayer* d_dir_encoder_layers_ = nullptr;
+    uint32_t dir_encoder_n_layers_ = 0;
+    MLPLayer* d_vis_decoder_layers_ = nullptr;
+    uint32_t vis_decoder_n_layers_ = 0;
+    MLPLayer* d_norm_decoder_layers_ = nullptr;
+    uint32_t norm_decoder_n_layers_ = 0;
+    MLPLayer* d_depth_decoder_layers_ = nullptr;
+    uint32_t depth_decoder_n_layers_ = 0;
+
+    char* d_relu_str_ = nullptr;
+    char* d_sigmoid_str_ = nullptr;
+    char* d_none_str_ = nullptr;
+
+    // Store host-side layer info for cleanup
+    std::vector<MLPLayer> h_dir_layers_;
+    std::vector<MLPLayer> h_vis_layers_;
+    std::vector<MLPLayer> h_norm_layers_;
+    std::vector<MLPLayer> h_depth_layers_;
+
+    char* allocate_string(const std::string& str) {
+        char* d_str = nullptr;
+        size_t len = str.length() + 1;
+        ORO_CHECK(oroMalloc((void**)&d_str, len));
+        ORO_CHECK(oroMemcpyHtoD((oroDeviceptr)d_str, const_cast<char*>(str.c_str()), len));
+        return d_str;
+    }
+
+    void free_device_memory() {
+        if (d_hash_table_) oroFree((oroDeviceptr)d_hash_table_);
+        if (d_hash_offsets_) oroFree((oroDeviceptr)d_hash_offsets_);
+
+        auto free_mlp_layers = [](const std::vector<MLPLayer>& layers) {
+            for (const auto& layer : layers) {
+                if (layer.weights) oroFree((oroDeviceptr)layer.weights);
+                if (layer.biases) oroFree((oroDeviceptr)layer.biases);
+            }
+        };
+
+        free_mlp_layers(h_dir_layers_);
+        free_mlp_layers(h_vis_layers_);
+        free_mlp_layers(h_norm_layers_);
+        free_mlp_layers(h_depth_layers_);
+
+        if (d_dir_encoder_layers_) oroFree((oroDeviceptr)d_dir_encoder_layers_);
+        if (d_vis_decoder_layers_) oroFree((oroDeviceptr)d_vis_decoder_layers_);
+        if (d_norm_decoder_layers_) oroFree((oroDeviceptr)d_norm_decoder_layers_);
+        if (d_depth_decoder_layers_) oroFree((oroDeviceptr)d_depth_decoder_layers_);
+
+        if (d_relu_str_) oroFree((oroDeviceptr)d_relu_str_);
+        if (d_sigmoid_str_) oroFree((oroDeviceptr)d_sigmoid_str_);
+        if (d_none_str_) oroFree((oroDeviceptr)d_none_str_);
+
+        loaded_ = false;
+    }
+
+    bool load_hash_encoding(const neural::WeightLoader& loader);
+    bool load_mlp(
+        const neural::WeightLoader& loader,
+        const std::string& prefix,
+        uint32_t n_layers,
+        uint32_t hidden_dim,
+        uint32_t input_dim,
+        uint32_t output_dim,
+        const std::string& output_activation,
+        MLPLayer*& d_layers_out,
+        uint32_t& n_layers_out,
+        std::vector<MLPLayer>& h_layers_storage
+    );
+};
+
+bool NeuralNetworkParamsOrochi::load_hash_encoding(const neural::WeightLoader& loader) {
+    std::cout << "  Loading hash encoding weights..." << std::endl;
+
+    const neural::Tensor* hash_tensor = loader.get_tensor("position_encoder.params");
+    if (!hash_tensor) {
+        std::cerr << "    Error: Could not find position_encoder.params" << std::endl;
+        return false;
+    }
+
+    constexpr uint32_t N_POS_DIMS = 3;
+    constexpr uint32_t N_FEATURES_PER_LEVEL = 2;
+
+    std::vector<uint32_t> h_offsets(config_.n_levels + 1);
+    uint32_t offset = 0;
+    float log2_per_level_scale = std::log2(config_.compute_per_level_scale());
+
+    for (uint32_t i = 0; i < config_.n_levels; ++i) {
+        float scale = grid_scale(i, log2_per_level_scale, config_.base_resolution);
+        uint32_t resolution = grid_resolution(scale);
+        uint32_t max_params = std::numeric_limits<uint32_t>::max() / 2;
+        float dense_params = std::pow((float)resolution, (float)N_POS_DIMS);
+        uint32_t params_in_level = (dense_params > (float)max_params) ? max_params : powi(resolution, N_POS_DIMS);
+        params_in_level = next_multiple(params_in_level, 8u);
+        uint32_t hashmap_size = 1u << config_.log2_hashmap_size;
+        params_in_level = std::min(params_in_level, hashmap_size);
+        h_offsets[i] = offset;
+        offset += params_in_level;
+    }
+
+    h_offsets[config_.n_levels] = offset;
+    uint32_t total_params = offset * N_FEATURES_PER_LEVEL;
+
+    std::cout << "    Hash table: " << total_params << " parameters (loaded: " << hash_tensor->data.size() << ")" << std::endl;
+
+    // Allocate and upload hash table
+    hash_table_size_ = hash_tensor->data.size();
+    ORO_CHECK(oroMalloc((void**)&d_hash_table_, hash_table_size_ * sizeof(float)));
+    ORO_CHECK(oroMemcpyHtoD((oroDeviceptr)d_hash_table_,
+                            const_cast<float*>(hash_tensor->data.data()),
+                            hash_table_size_ * sizeof(float)));
+
+    // Allocate and upload offset table
+    ORO_CHECK(oroMalloc((void**)&d_hash_offsets_, (config_.n_levels + 1) * sizeof(uint32_t)));
+    ORO_CHECK(oroMemcpyHtoD((oroDeviceptr)d_hash_offsets_,
+                            h_offsets.data(),
+                            (config_.n_levels + 1) * sizeof(uint32_t)));
+
+    // Setup HashGridParams
+    d_params_.hash_encoding.hash_table = d_hash_table_;
+    d_params_.hash_encoding.offset_table = d_hash_offsets_;
+    d_params_.hash_encoding.n_levels = config_.n_levels;
+    d_params_.hash_encoding.n_features_per_level = config_.n_features_per_level;
+    d_params_.hash_encoding.log2_hashmap_size = config_.log2_hashmap_size;
+    d_params_.hash_encoding.base_resolution = config_.base_resolution;
+    d_params_.hash_encoding.per_level_scale = config_.compute_per_level_scale();
+
+    std::cout << "    Hash encoding: " << config_.n_levels << " levels, "
+              << config_.n_features_per_level << " features/level" << std::endl;
+    return true;
+}
+
+bool NeuralNetworkParamsOrochi::load_mlp(
+    const neural::WeightLoader& loader,
+    const std::string& prefix,
+    uint32_t n_layers,
+    uint32_t hidden_dim,
+    uint32_t input_dim,
+    uint32_t output_dim,
+    const std::string& output_activation,
+    MLPLayer*& d_layers_out,
+    uint32_t& n_layers_out,
+    std::vector<MLPLayer>& h_layers_storage
+) {
+    std::cout << "  Loading " << prefix << " MLP weights..." << std::endl;
+
+    const neural::Tensor* params_tensor = loader.get_tensor(prefix + ".params");
+    if (!params_tensor) {
+        std::cerr << "    Error: Could not find " << prefix << ".params" << std::endl;
+        return false;
+    }
+
+    h_layers_storage.resize(n_layers + 1);
+    size_t offset = 0;
+    uint32_t padded_output_dim = ((output_dim + 15) / 16) * 16;
+
+    for (uint32_t l = 0; l < n_layers + 1; ++l) {
+        uint32_t layer_in_dim = (l == 0) ? input_dim : hidden_dim;
+        uint32_t layer_out_dim = (l == n_layers) ? padded_output_dim : hidden_dim;
+
+        h_layers_storage[l].in_dim = layer_in_dim;
+        h_layers_storage[l].out_dim = layer_out_dim;
+        h_layers_storage[l].biases = nullptr;
+
+        size_t weight_size = layer_out_dim * layer_in_dim;
+
+        if (offset + weight_size > params_tensor->data.size()) {
+            std::cerr << "    Error: Parameter size mismatch at layer " << l << std::endl;
+            return false;
+        }
+
+        // Allocate and copy weights
+        ORO_CHECK(oroMalloc((void**)&h_layers_storage[l].weights, weight_size * sizeof(float)));
+        ORO_CHECK(oroMemcpyHtoD((oroDeviceptr)h_layers_storage[l].weights,
+                                const_cast<float*>(params_tensor->data.data() + offset),
+                                weight_size * sizeof(float)));
+        offset += weight_size;
+    }
+
+    std::cout << "    " << prefix << ": " << n_layers + 1 << " layers, "
+              << offset << "/" << params_tensor->data.size() << " params used" << std::endl;
+
+    // Upload layer array to device
+    ORO_CHECK(oroMalloc((void**)&d_layers_out, (n_layers + 1) * sizeof(MLPLayer)));
+    ORO_CHECK(oroMemcpyHtoD((oroDeviceptr)d_layers_out,
+                            h_layers_storage.data(),
+                            (n_layers + 1) * sizeof(MLPLayer)));
+
+    n_layers_out = n_layers + 1;
+    return true;
+}
+
+bool NeuralNetworkParamsOrochi::load_from_weights(const neural::WeightLoader& loader) {
+    if (!loader.is_loaded()) {
+        std::cerr << "WeightLoader has no weights loaded" << std::endl;
+        return false;
+    }
+
+    std::cout << "Converting weights for HIPRT kernel..." << std::endl;
+
+    if (!load_hash_encoding(loader)) return false;
+
+    uint32_t pos_encoding_dim = config_.encoding_n_output_dims();
+    uint32_t dir_encoding_dim = config_.direction_encoder_n_output_dims();
+    uint32_t decoder_input_dim = pos_encoding_dim + dir_encoding_dim;
+
+    // Direction encoder
+    if (!load_mlp(loader, "direction_encoder",
+                  config_.direction_n_hidden_layers, config_.direction_hidden_dim,
+                  16, config_.direction_hidden_dim, "None",
+                  d_dir_encoder_layers_, dir_encoder_n_layers_, h_dir_layers_)) return false;
+
+    // Visibility decoder
+    if (!load_mlp(loader, "visibility_decoder",
+                  config_.visibility_decoder.n_decoder_layers, config_.n_neurons,
+                  decoder_input_dim, config_.visibility_decoder.n_output_dims,
+                  config_.visibility_decoder.output_activation,
+                  d_vis_decoder_layers_, vis_decoder_n_layers_, h_vis_layers_)) return false;
+
+    // Normal decoder
+    if (!load_mlp(loader, "normal_decoder",
+                  config_.normal_decoder.n_decoder_layers, config_.n_neurons,
+                  decoder_input_dim, config_.normal_decoder.n_output_dims,
+                  config_.normal_decoder.output_activation,
+                  d_norm_decoder_layers_, norm_decoder_n_layers_, h_norm_layers_)) return false;
+
+    // Depth decoder
+    if (!load_mlp(loader, "depth_decoder",
+                  config_.depth_decoder.n_decoder_layers, config_.n_neurons,
+                  decoder_input_dim, config_.depth_decoder.n_output_dims,
+                  config_.depth_decoder.output_activation,
+                  d_depth_decoder_layers_, depth_decoder_n_layers_, h_depth_layers_)) return false;
+
+    // Setup MLPParams structures
+    d_params_.direction_encoder.layers = d_dir_encoder_layers_;
+    d_params_.direction_encoder.n_layers = dir_encoder_n_layers_;
+    d_params_.direction_encoder.output_activation = d_none_str_;
+
+    d_params_.visibility_decoder.layers = d_vis_decoder_layers_;
+    d_params_.visibility_decoder.n_layers = vis_decoder_n_layers_;
+    if (config_.visibility_decoder.output_activation[0] == 'S' ||
+        config_.visibility_decoder.output_activation[0] == 's')
+        d_params_.visibility_decoder.output_activation = d_sigmoid_str_;
+    else if (config_.visibility_decoder.output_activation[0] == 'R' ||
+             config_.visibility_decoder.output_activation[0] == 'r')
+        d_params_.visibility_decoder.output_activation = d_relu_str_;
+    else
+        d_params_.visibility_decoder.output_activation = d_none_str_;
+
+    d_params_.normal_decoder.layers = d_norm_decoder_layers_;
+    d_params_.normal_decoder.n_layers = norm_decoder_n_layers_;
+    d_params_.normal_decoder.output_activation = d_none_str_;
+
+    d_params_.depth_decoder.layers = d_depth_decoder_layers_;
+    d_params_.depth_decoder.n_layers = depth_decoder_n_layers_;
+    d_params_.depth_decoder.output_activation = d_none_str_;
+
+    loaded_ = true;
+    std::cout << "Neural weights loaded successfully" << std::endl;
+    return true;
+}
 
 // =============================================================================
 // Data Structures
@@ -263,6 +648,19 @@ int main(int argc, char** argv) {
     // Store mesh normal data for smooth shading
     std::vector<MeshNormalData> mesh_normal_data;
 
+    // Store neural asset data
+    struct NeuralAssetInfo {
+        float3_simple bounds_min;
+        float3_simple bounds_max;
+        std::string weights_path;
+        uint32_t instance_id;
+    };
+    std::vector<NeuralAssetInfo> neural_asset_info;
+    std::vector<std::unique_ptr<NeuralNetworkParamsOrochi>> neural_hosts;
+
+    // Default network config (matches training parameters)
+    neural::NetworkConfig network_config;
+
     uint32_t instance_id = 0;
     bool has_neural_assets = false;
     bool has_triangle_meshes = false;
@@ -367,16 +765,64 @@ int main(int argc, char** argv) {
                 {bmin.x, bmin.y, bmin.z, bmax.x, bmax.y, bmax.z}
             };
 
-            // Build AABB geometry (geomType=1 for neural/custom)
+            // Build AABB geometry with geomType=1 for neural assets (GEOM_TYPE_NEURAL)
+            // This matches the custom intersection function registration in kernel_compiler
+            // geomType=0 is reserved for triangles, geomType=1 for custom/neural primitives
             auto geom = geom_builder.build_aabb_geometry(aabbs, 1);
             if (geom.valid()) {
                 std::array<float, 12> transform;
                 for (int i = 0; i < 12; ++i) transform[i] = obj.transform[i];
 
-                scene_builder.add_instance(geom.get(), transform, instance_id++);
+                scene_builder.add_instance(geom.get(), transform, instance_id);
                 std::cout << "  Added neural asset AABB: ["
                           << bmin.x << "," << bmin.y << "," << bmin.z << "] to ["
                           << bmax.x << "," << bmax.y << "," << bmax.z << "]" << std::endl;
+                std::cout << "  Transform matrix:" << std::endl;
+                std::cout << "    [" << transform[0] << ", " << transform[1] << ", " << transform[2] << ", " << transform[3] << "]" << std::endl;
+                std::cout << "    [" << transform[4] << ", " << transform[5] << ", " << transform[6] << ", " << transform[7] << "]" << std::endl;
+                std::cout << "    [" << transform[8] << ", " << transform[9] << ", " << transform[10] << ", " << transform[11] << "]" << std::endl;
+
+                // Store neural asset info for later weight loading
+                NeuralAssetInfo info;
+                info.bounds_min = bmin;
+                info.bounds_max = bmax;
+                info.weights_path = obj.weights;
+                info.instance_id = instance_id;
+                neural_asset_info.push_back(info);
+
+                // Load weights if specified
+                if (!obj.weights.empty()) {
+                    std::cout << "  Loading neural weights: " << obj.weights << std::endl;
+                    auto host = std::make_unique<NeuralNetworkParamsOrochi>(network_config);
+                    neural::WeightLoader loader;
+                    if (loader.load_from_file(obj.weights)) {
+                        if (host->load_from_weights(loader)) {
+                            neural_hosts.push_back(std::move(host));
+                        } else {
+                            std::cerr << "  Warning: Failed to convert weights for neural asset" << std::endl;
+                            neural_hosts.push_back(nullptr);
+                        }
+                    } else {
+                        std::cerr << "  Warning: Failed to load weights from " << obj.weights << std::endl;
+                        neural_hosts.push_back(nullptr);
+                    }
+                } else {
+                    std::cerr << "  Warning: Neural asset has no weights specified" << std::endl;
+                    neural_hosts.push_back(nullptr);
+                }
+
+                instance_id++;
+
+                // Export and verify AABB geometry bounds
+                hiprtFloat3 exportedMin, exportedMax;
+                hiprtError exportErr = hiprtExportGeometryAabb(
+                    context.get_context(), geom.get(), exportedMin, exportedMax);
+                if (exportErr == hiprtSuccess) {
+                    std::cout << "  Exported AABB bounds: min=(" << exportedMin.x << "," << exportedMin.y << "," << exportedMin.z
+                              << ") max=(" << exportedMax.x << "," << exportedMax.y << "," << exportedMax.z << ")" << std::endl;
+                } else {
+                    std::cerr << "  Warning: Failed to export AABB bounds (error " << exportErr << ")" << std::endl;
+                }
 
                 // Keep geometry alive until scene is built
                 geometry_handles.push_back(std::move(geom));
@@ -390,6 +836,17 @@ int main(int argc, char** argv) {
     if (!scene.valid()) {
         std::cerr << "Failed to build scene" << std::endl;
         return 1;
+    }
+
+    // Export and verify scene AABB
+    hiprtFloat3 sceneMin, sceneMax;
+    hiprtError sceneExportErr = hiprtExportSceneAabb(
+        context.get_context(), scene.get(), sceneMin, sceneMax);
+    if (sceneExportErr == hiprtSuccess) {
+        std::cout << "Scene AABB: min=(" << sceneMin.x << "," << sceneMin.y << "," << sceneMin.z
+                  << ") max=(" << sceneMax.x << "," << sceneMax.y << "," << sceneMax.z << ")" << std::endl;
+    } else {
+        std::cerr << "Warning: Failed to export scene AABB (error " << sceneExportErr << ")" << std::endl;
     }
 
     // Upload mesh normal data to GPU for smooth shading
@@ -511,12 +968,143 @@ int main(int argc, char** argv) {
     light.color = light_color;
     light.intensity = light_intensity;
 
+    // Set up NeuralAssetData if we have neural assets
+    void* d_neural_asset_data = nullptr;
+    void* d_neural_aabb_min = nullptr;
+    void* d_neural_aabb_max = nullptr;
+    void* d_neural_params_array = nullptr;
+    void* d_instance_to_neural_idx = nullptr;
+
+    if (has_neural_assets && !neural_asset_info.empty()) {
+        std::cout << "\nSetting up neural asset data for " << neural_asset_info.size() << " neural assets..." << std::endl;
+
+        // Allocate AABB arrays
+        size_t num_neural = neural_asset_info.size();
+        ORO_CHECK(oroMalloc(&d_neural_aabb_min, num_neural * sizeof(float3_kernel)));
+        ORO_CHECK(oroMalloc(&d_neural_aabb_max, num_neural * sizeof(float3_kernel)));
+
+        // Build host-side AABB arrays
+        std::vector<float3_kernel> h_aabb_min(num_neural);
+        std::vector<float3_kernel> h_aabb_max(num_neural);
+        for (size_t i = 0; i < num_neural; ++i) {
+            h_aabb_min[i] = {neural_asset_info[i].bounds_min.x,
+                            neural_asset_info[i].bounds_min.y,
+                            neural_asset_info[i].bounds_min.z};
+            h_aabb_max[i] = {neural_asset_info[i].bounds_max.x,
+                            neural_asset_info[i].bounds_max.y,
+                            neural_asset_info[i].bounds_max.z};
+        }
+
+        // Upload AABBs
+        ORO_CHECK(oroMemcpyHtoD((oroDeviceptr)d_neural_aabb_min,
+                                h_aabb_min.data(), num_neural * sizeof(float3_kernel)));
+        ORO_CHECK(oroMemcpyHtoD((oroDeviceptr)d_neural_aabb_max,
+                                h_aabb_max.data(), num_neural * sizeof(float3_kernel)));
+
+        // Build neural params array (device pointers to per-asset NeuralNetworkParams)
+        std::vector<NeuralNetworkParams> h_neural_params(num_neural);
+        for (size_t i = 0; i < num_neural; ++i) {
+            if (neural_hosts[i] && neural_hosts[i]->is_loaded()) {
+                h_neural_params[i] = neural_hosts[i]->get_device_params();
+                std::cout << "  Asset " << i << ": weights loaded" << std::endl;
+            } else {
+                std::memset(&h_neural_params[i], 0, sizeof(NeuralNetworkParams));
+                std::cout << "  Asset " << i << ": no weights (using zeros)" << std::endl;
+            }
+        }
+
+        // Upload neural params array
+        ORO_CHECK(oroMalloc(&d_neural_params_array, num_neural * sizeof(NeuralNetworkParams)));
+        ORO_CHECK(oroMemcpyHtoD((oroDeviceptr)d_neural_params_array,
+                                h_neural_params.data(), num_neural * sizeof(NeuralNetworkParams)));
+
+        // Build instance ID to neural asset index mapping
+        // instance_id is the total index across all scene objects (meshes + neural)
+        // We need to map from instance_id to neural asset index (0, 1, 2, ...)
+        std::vector<int32_t> h_instance_to_neural(instance_id, -1);  // -1 = not a neural asset
+        for (size_t i = 0; i < num_neural; ++i) {
+            uint32_t inst_id = neural_asset_info[i].instance_id;
+            if (inst_id < h_instance_to_neural.size()) {
+                h_instance_to_neural[inst_id] = (int32_t)i;
+                std::cout << "  Instance " << inst_id << " -> Neural asset " << i << std::endl;
+            }
+        }
+
+        // Upload instance mapping
+        ORO_CHECK(oroMalloc(&d_instance_to_neural_idx, h_instance_to_neural.size() * sizeof(int32_t)));
+        ORO_CHECK(oroMemcpyHtoD((oroDeviceptr)d_instance_to_neural_idx,
+                                h_instance_to_neural.data(), h_instance_to_neural.size() * sizeof(int32_t)));
+
+        // Build and upload NeuralAssetData structure
+        NeuralAssetData h_neural_data;
+        h_neural_data.aabb_min = (float3_kernel*)d_neural_aabb_min;
+        h_neural_data.aabb_max = (float3_kernel*)d_neural_aabb_max;
+        h_neural_data.neural_params = (NeuralNetworkParams*)d_neural_params_array;
+        h_neural_data.num_assets = (uint32_t)num_neural;
+        h_neural_data.instance_to_neural_idx = (int32_t*)d_instance_to_neural_idx;
+        h_neural_data.max_instance_id = (uint32_t)h_instance_to_neural.size();
+        h_neural_data.metrics = (TraversalMetrics*)d_metrics_buffer;  // Share metrics buffer
+
+        ORO_CHECK(oroMalloc(&d_neural_asset_data, sizeof(NeuralAssetData)));
+        ORO_CHECK(oroMemcpyHtoD((oroDeviceptr)d_neural_asset_data,
+                                &h_neural_data, sizeof(NeuralAssetData)));
+
+        std::cout << "Neural asset data uploaded successfully" << std::endl;
+    }
+
     // Launch kernel
     std::cout << "\nLaunching render kernel..." << std::endl;
 
     hiprtScene scene_handle = scene.get();
     hiprtFuncTable func_table = compiled.get_func_table();
-    void* neural_data = nullptr;  // TODO: Set up neural asset data when weights are loaded
+
+    std::cout << "funcTable: " << (func_table ? "valid" : "NULL") << " (" << (void*)func_table << ")" << std::endl;
+
+    // Set up function table data for custom intersection function
+    // This is CRITICAL - without this, the custom intersection function receives nullptr for data
+    void* d_flat_aabb_data = nullptr;
+    if (has_neural_assets && func_table && !neural_asset_info.empty()) {
+        std::cout << "\nSetting up function table data for custom intersection..." << std::endl;
+
+        // Create flat AABB data array: [min_x, min_y, min_z, max_x, max_y, max_z] per primitive
+        // This format matches what intersectNeuralAABB expects
+        std::vector<float> flat_aabb_data;
+        for (const auto& info : neural_asset_info) {
+            flat_aabb_data.push_back(info.bounds_min.x);
+            flat_aabb_data.push_back(info.bounds_min.y);
+            flat_aabb_data.push_back(info.bounds_min.z);
+            flat_aabb_data.push_back(info.bounds_max.x);
+            flat_aabb_data.push_back(info.bounds_max.y);
+            flat_aabb_data.push_back(info.bounds_max.z);
+
+            std::cout << "  AABB[" << (&info - &neural_asset_info[0]) << "]: "
+                      << "min=(" << info.bounds_min.x << "," << info.bounds_min.y << "," << info.bounds_min.z << ") "
+                      << "max=(" << info.bounds_max.x << "," << info.bounds_max.y << "," << info.bounds_max.z << ")" << std::endl;
+        }
+
+        // Upload flat AABB data to GPU
+        size_t flat_aabb_size = flat_aabb_data.size() * sizeof(float);
+        ORO_CHECK(oroMalloc(&d_flat_aabb_data, flat_aabb_size));
+        ORO_CHECK(oroMemcpyHtoD((oroDeviceptr)d_flat_aabb_data, flat_aabb_data.data(), flat_aabb_size));
+
+        std::cout << "  Uploaded " << flat_aabb_data.size() << " floats (" << flat_aabb_size << " bytes) to GPU" << std::endl;
+        std::cout << "  d_flat_aabb_data = " << d_flat_aabb_data << std::endl;
+
+        // Set function table data for geomType=1 (neural/custom), all ray types
+        hiprtFuncDataSet data_set;
+        data_set.intersectFuncData = d_flat_aabb_data;
+        data_set.filterFuncData = nullptr;
+
+        // Set for rayType=0 (primary rays)
+        hiprtError err0 = hiprtSetFuncTable(context.get_context(), func_table, 1, 0, data_set);
+        std::cout << "  hiprtSetFuncTable(geomType=1, rayType=0, data=" << d_flat_aabb_data << ") -> "
+                  << (err0 == hiprtSuccess ? "SUCCESS" : "FAILED") << " (err=" << err0 << ")" << std::endl;
+
+        // Set for rayType=1 (shadow rays)
+        hiprtError err1 = hiprtSetFuncTable(context.get_context(), func_table, 1, 1, data_set);
+        std::cout << "  hiprtSetFuncTable(geomType=1, rayType=1, data=" << d_flat_aabb_data << ") -> "
+                  << (err1 == hiprtSuccess ? "SUCCESS" : "FAILED") << " (err=" << err1 << ")" << std::endl;
+    }
 
     uint32_t w = width;
     uint32_t h = height;
@@ -524,7 +1112,7 @@ int main(int argc, char** argv) {
     void* kernel_args[] = {
         &scene_handle,
         &func_table,
-        &neural_data,
+        &d_neural_asset_data,
         &d_mesh_data_array,
         &num_mesh_instances,
         &camera,
@@ -584,6 +1172,15 @@ int main(int argc, char** argv) {
         if (gpu.d_triangle_indices) oroFree((oroDeviceptr)gpu.d_triangle_indices);
     }
     if (d_mesh_data_array) oroFree((oroDeviceptr)d_mesh_data_array);
+
+    // Free neural asset GPU buffers
+    if (d_neural_asset_data) oroFree((oroDeviceptr)d_neural_asset_data);
+    if (d_neural_aabb_min) oroFree((oroDeviceptr)d_neural_aabb_min);
+    if (d_neural_aabb_max) oroFree((oroDeviceptr)d_neural_aabb_max);
+    if (d_neural_params_array) oroFree((oroDeviceptr)d_neural_params_array);
+    if (d_instance_to_neural_idx) oroFree((oroDeviceptr)d_instance_to_neural_idx);
+    if (d_flat_aabb_data) oroFree((oroDeviceptr)d_flat_aabb_data);
+    // neural_hosts will be freed automatically by unique_ptr destructors
 
     std::cout << "\n=== HIPRT Rendering Complete ===" << std::endl;
     context.cleanup();
