@@ -19,25 +19,26 @@
 // This represents "wasted work" - threads that must idle during the branch
 __device__ __forceinline__ uint32_t measure_divergence(bool condition) {
     // Get active mask for current warp (which threads are active right now)
-    unsigned int active_mask = __activemask();
+    // unsigned int active_mask = __activemask();
 
-    // Ballot: which threads in this warp satisfy the condition?
-    // Each bit in the result represents one thread's vote
-    unsigned int ballot = __ballot_sync(active_mask, condition);
+    // // Ballot: which threads in this warp satisfy the condition?
+    // // Each bit in the result represents one thread's vote
+    // unsigned int ballot = __ballot_sync(active_mask, condition);
 
-    // Count threads taking the TRUE path
-    unsigned int true_count = __popc(ballot);
+    // // Count threads taking the TRUE path
+    // unsigned int true_count = __popc(ballot);
 
-    // Count threads taking the FALSE path
-    unsigned int false_count = __popc(active_mask & ~ballot);
+    // // Count threads taking the FALSE path
+    // unsigned int false_count = __popc(active_mask & ~ballot);
 
-    // Divergence metric: min(true_count, false_count)
-    // This measures "wasted work" - threads that idle during divergence
-    // For example:
-    //   - If 28 threads take TRUE and 4 take FALSE, divergence = 4
-    //   - If 16 threads take TRUE and 16 take FALSE, divergence = 16 (worst case)
-    //   - If all threads take same path, divergence = 0 (best case)
-    return min(true_count, false_count);
+    // // Divergence metric: min(true_count, false_count)
+    // // This measures "wasted work" - threads that idle during divergence
+    // // For example:
+    // //   - If 28 threads take TRUE and 4 take FALSE, divergence = 4
+    // //   - If 16 threads take TRUE and 16 take FALSE, divergence = 16 (worst case)
+    // //   - If all threads take same path, divergence = 0 (best case)
+    // return min(true_count, false_count);
+    return 0;
 }
 
 // Accumulate divergence into a counter

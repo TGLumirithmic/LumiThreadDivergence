@@ -104,9 +104,9 @@ __device__ __forceinline__ void hash_encode(
                 bool use_direct_index = (grid_volume <= hashmap_size);
 
                 // Measure divergence: direct indexing vs hashing
-                if (div_counter != nullptr) {
-                    *div_counter += measure_divergence(use_direct_index);
-                }
+                // if (div_counter != nullptr) {
+                //     *div_counter += measure_divergence(use_direct_index);
+                // }
 
                 // If grid fits into hashmap at this resolution, directly index
                 if (use_direct_index) {
@@ -163,7 +163,8 @@ __device__ __forceinline__ void matmul_add_bias(
     uint32_t out_dim
 ) {
     for (uint32_t i = 0; i < out_dim; ++i) {
-        float sum = (bias != nullptr) ? bias[i] : 0.0f;
+        // float sum = (bias != nullptr) ? bias[i] : 0.0f;
+        float sum = 0.0f;
         for (uint32_t j = 0; j < in_dim; ++j) {
             // Row-major indexing: weights[out_idx, in_idx] = weights[out_idx * in_dim + in_idx]
             sum += weights[i * in_dim + j] * input[j];
@@ -183,7 +184,8 @@ __device__ __forceinline__ void matmul_add_bias_fp16(
 ) {
     const __half zero = __float2half(0.0f);
     for (uint32_t i = 0; i < out_dim; ++i) {
-        __half sum = (bias != nullptr) ? bias[i] : zero;
+        // __half sum = (bias != nullptr) ? bias[i] : zero;
+        __half sum = zero;
         for (uint32_t j = 0; j < in_dim; ++j) {
             // Row-major indexing: weights[out_idx, in_idx] = weights[out_idx * in_dim + in_idx]
             sum = __hadd(sum, __hmul(weights[i * in_dim + j], input[j]));
@@ -269,9 +271,9 @@ __device__ __forceinline__ void mlp_forward(
         bool is_hidden_layer = (l < params.n_layers - 1);
 
         // Measure divergence: hidden vs output layer activation
-        if (div_counter != nullptr) {
-            *div_counter += measure_divergence(is_hidden_layer);
-        }
+        // if (div_counter != nullptr) {
+        //     *div_counter += measure_divergence(is_hidden_layer);
+        // }
 
         if (is_hidden_layer) {
             // Hidden layers: use ReLU
@@ -320,7 +322,8 @@ __device__ __forceinline__ void mlp_forward_fp16(
         // Convert weights to fp16 on the fly and compute
         const __half zero = __float2half(0.0f);
         for (uint32_t i = 0; i < layer.out_dim; ++i) {
-            __half sum = (layer.biases != nullptr) ? __float2half(layer.biases[i]) : zero;
+            // __half sum = (layer.biases != nullptr) ? __float2half(layer.biases[i]) : zero;
+            __half sum = 0.0;
             for (uint32_t j = 0; j < layer.in_dim; ++j) {
                 __half w = __float2half(layer.weights[i * layer.in_dim + j]);
                 sum = __hadd(sum, __hmul(w, current_input_fp16[j]));

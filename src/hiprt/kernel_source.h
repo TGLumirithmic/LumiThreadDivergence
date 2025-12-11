@@ -466,35 +466,27 @@ __device__ bool intersectNeuralAABB(
     void* payload,
     hiprtHit& hit
 ) {
-    // DEBUG: Minimal output - only print once for block (0,0)
-    // if (threadIdx.x == 0 && threadIdx.y == 0 && blockIdx.x == 0 && blockIdx.y == 0) {
-    //     printf("intersectNeuralAABB: data=%p primID=%d\n", data, hit.primID);
-    // }
-
     // Data contains flat AABB bounds: [min_x, min_y, min_z, max_x, max_y, max_z] per primitive
-    // This is set via hiprtSetFuncTable in main_hiprt.cpp
     if (data == nullptr) {
-        // No data provided - cannot perform intersection
-        if (threadIdx.x == 0 && threadIdx.y == 0 && blockIdx.x == 0 && blockIdx.y == 0) {
-            printf("intersectNeuralAABB: ERROR - data is nullptr!\n");
-        }
         return false;
     }
 
+    // Data contains flat AABB bounds indexed by neural asset order (not primID)
+    // We'll get the correct index after looking up neural_idx from instanceID
+    // For now, use primID=0 bounds as a fallback for the AABB test
+    // The actual neural_idx bounds will be used after we determine which neural asset this is
     const float* aabb_data = reinterpret_cast<const float*>(data);
-    const uint32_t prim_offset = hit.primID * 6;
 
-    float min_x = aabb_data[prim_offset + 0];
-    float min_y = aabb_data[prim_offset + 1];
-    float min_z = aabb_data[prim_offset + 2];
-    float max_x = aabb_data[prim_offset + 3];
-    float max_y = aabb_data[prim_offset + 4];
-    float max_z = aabb_data[prim_offset + 5];
-
-    // DEBUG disabled for performance
-    // if (threadIdx.x == 0 && threadIdx.y == 0 && blockIdx.x == 15 && blockIdx.y == 15) {
-    //     printf("intersectNeuralAABB DETAIL: primID=%d\n", hit.primID);
-    // }
+    // Initially use primID for AABB bounds (will be corrected after instance lookup)
+    // Each neural geometry has only 1 primitive, so primID is always 0 within that geometry
+    // But aabb_data is indexed by neural asset order, so we'll re-read after getting neural_idx
+    uint32_t initial_idx = hit.primID * 6;
+    float min_x = aabb_data[initial_idx + 0];
+    float min_y = aabb_data[initial_idx + 1];
+    float min_z = aabb_data[initial_idx + 2];
+    float max_x = aabb_data[initial_idx + 3];
+    float max_y = aabb_data[initial_idx + 4];
+    float max_z = aabb_data[initial_idx + 5];
 
     // Ray-AABB intersection using slab method
     float inv_dx = 1.0f / ray.direction.x;
@@ -511,41 +503,183 @@ __device__ bool intersectNeuralAABB(
     float tmin = fmaxf(fmaxf(fminf(t1, t2), fminf(t3, t4)), fminf(t5, t6));
     float tmax = fminf(fminf(fmaxf(t1, t2), fmaxf(t3, t4)), fmaxf(t5, t6));
 
-    // Check for valid intersection
+    // Check for valid AABB intersection
     if (tmax < 0.0f || tmin > tmax || tmin < ray.minT || tmin > ray.maxT) {
         return false;
     }
 
-    // Check if this hit is closer than existing hit
-    // Note: hit.t may be negative (-1) if no previous hit, so only reject if hit.t is positive
+    // Check if this potential hit is closer than existing hit
     if (hit.t > 0.0f && tmin >= hit.t) {
         return false;
     }
 
-    hit.t = tmin;
+    // Get payload for neural network parameters and metrics
+    TraversalPayload* trav_payload = reinterpret_cast<TraversalPayload*>(payload);
+    NeuralAssetData* neural_data = (trav_payload != nullptr) ? trav_payload->neural_data : nullptr;
+    TraversalMetrics* metrics = (trav_payload != nullptr) ? trav_payload->metrics : nullptr;
 
-    // Compute hit point for normal calculation
-    float px = ray.origin.x + tmin * ray.direction.x;
-    float py = ray.origin.y + tmin * ray.direction.y;
-    float pz = ray.origin.z + tmin * ray.direction.z;
-
-    // Determine which face was hit (for normal)
-    float eps = 1e-4f;
-    if (fabsf(px - min_x) < eps) {
-        hit.normal = hiprtFloat3{-1.0f, 0.0f, 0.0f};
-    } else if (fabsf(px - max_x) < eps) {
-        hit.normal = hiprtFloat3{1.0f, 0.0f, 0.0f};
-    } else if (fabsf(py - min_y) < eps) {
-        hit.normal = hiprtFloat3{0.0f, -1.0f, 0.0f};
-    } else if (fabsf(py - max_y) < eps) {
-        hit.normal = hiprtFloat3{0.0f, 1.0f, 0.0f};
-    } else if (fabsf(pz - min_z) < eps) {
-        hit.normal = hiprtFloat3{0.0f, 0.0f, -1.0f};
-    } else {
-        hit.normal = hiprtFloat3{0.0f, 0.0f, 1.0f};
+    // Track neural intersection test
+    if (metrics != nullptr) {
+        metrics->neural_tests++;
     }
 
-    hit.uv = hiprtFloat2{0.0f, 0.0f};
+    // If no neural data available, fall back to simple AABB intersection
+    if (neural_data == nullptr || neural_data->neural_params == nullptr) {
+        hit.t = tmin;
+        // Compute hit point for normal calculation
+        float px = ray.origin.x + tmin * ray.direction.x;
+        float py = ray.origin.y + tmin * ray.direction.y;
+        float pz = ray.origin.z + tmin * ray.direction.z;
+
+        // Determine which face was hit (for normal)
+        float eps = 1e-4f;
+        if (fabsf(px - min_x) < eps) {
+            hit.normal = hiprtFloat3{-1.0f, 0.0f, 0.0f};
+        } else if (fabsf(px - max_x) < eps) {
+            hit.normal = hiprtFloat3{1.0f, 0.0f, 0.0f};
+        } else if (fabsf(py - min_y) < eps) {
+            hit.normal = hiprtFloat3{0.0f, -1.0f, 0.0f};
+        } else if (fabsf(py - max_y) < eps) {
+            hit.normal = hiprtFloat3{0.0f, 1.0f, 0.0f};
+        } else if (fabsf(pz - min_z) < eps) {
+            hit.normal = hiprtFloat3{0.0f, 0.0f, -1.0f};
+        } else {
+            hit.normal = hiprtFloat3{0.0f, 0.0f, 1.0f};
+        }
+        hit.uv = hiprtFloat2{0.0f, 0.0f};
+        return true;
+    }
+
+    // Get neural network parameters using instance ID to map to neural asset index
+    // Each neural asset is a separate geometry instance, so we use instanceID (not primID)
+    // The instance_to_neural_idx array maps scene instance IDs to neural asset indices
+    if (hit.instanceID >= neural_data->max_instance_id) {
+        return false;
+    }
+
+    int32_t neural_idx = neural_data->instance_to_neural_idx[hit.instanceID];
+    if (neural_idx < 0 || (uint32_t)neural_idx >= neural_data->num_assets) {
+        // This instance is not a neural asset, fall back to AABB hit
+        hit.t = tmin;
+        hit.normal = hiprtFloat3{0.0f, 1.0f, 0.0f};
+        hit.uv = hiprtFloat2{0.0f, 0.0f};
+        return true;
+    }
+
+    const NeuralNetworkParams& net_params = neural_data->neural_params[neural_idx];
+
+    // Check if network parameters are valid
+    if (net_params.hash_encoding.hash_table == nullptr) {
+        // No valid network, fall back to AABB surface hit
+        hit.t = tmin;
+        hit.normal = hiprtFloat3{0.0f, 1.0f, 0.0f};
+        hit.uv = hiprtFloat2{0.0f, 0.0f};
+        return true;
+    }
+
+    // AABB dimensions for normalizing positions to [0,1]^3
+    float3 aabb_min = make_float3(min_x, min_y, min_z);
+    float3 aabb_size = make_float3(max_x - min_x, max_y - min_y, max_z - min_z);
+
+    // Compute the AABB entry point (where ray enters the bounding box)
+    float3 entry_pos = make_float3(
+        ray.origin.x + tmin * ray.direction.x,
+        ray.origin.y + tmin * ray.direction.y,
+        ray.origin.z + tmin * ray.direction.z
+    );
+
+    // Normalize entry position to [0,1]^3 within the AABB
+    float3 normalized_pos = make_float3(
+        (entry_pos.x - aabb_min.x) / aabb_size.x,
+        (entry_pos.y - aabb_min.y) / aabb_size.y,
+        (entry_pos.z - aabb_min.z) / aabb_size.z
+    );
+
+    // Clamp to valid range
+    normalized_pos.x = fmaxf(0.0f, fminf(1.0f, normalized_pos.x));
+    normalized_pos.y = fmaxf(0.0f, fminf(1.0f, normalized_pos.y));
+    normalized_pos.z = fmaxf(0.0f, fminf(1.0f, normalized_pos.z));
+
+    float ray_len = sqrtf(
+        ray.direction.x * ray.direction.x +
+        ray.direction.y * ray.direction.y +
+        ray.direction.z * ray.direction.z
+    );
+    // Ray direction (already normalized)
+    float3 ray_dir = make_float3(
+        ray.direction.x / ray_len,
+        ray.direction.y / ray_len,
+        ray.direction.z / ray_len
+    );
+
+    // Query neural network at AABB entry point
+    float visibility;
+    float3 normal;
+    float depth;
+
+    neural_inference(
+        normalized_pos,
+        ray_dir,
+        net_params,
+        visibility,
+        normal,
+        depth,
+        metrics
+    );
+
+    // Track divergence in visibility decisions
+    const float VIS_THRESHOLD = 0.5f;
+    bool is_hit = (visibility >= VIS_THRESHOLD);
+    if (metrics != nullptr) {
+        metrics->neural_divergence += measure_divergence(is_hit);
+    }
+
+    // Check if neural network predicts a hit
+    if (!is_hit) {
+        if (metrics != nullptr) {
+            metrics->early_reject_divergence += measure_divergence(true);
+        }
+        return false;
+    }
+
+    // Compute hit distance using depth output
+    // Depth is the distance from AABB entry to the actual surface hit
+    // Scale depth by AABB diagonal to convert from normalized to world space
+    float aabb_diagonal = sqrtf(aabb_size.x * aabb_size.x +
+                                aabb_size.y * aabb_size.y +
+                                aabb_size.z * aabb_size.z);
+    float hit_t = tmin + depth*1.319 / ray_len;
+
+    // Validate hit is within AABB bounds and ray range
+    if (hit_t < ray.minT || hit_t > tmax || hit_t > ray.maxT) {
+        // Depth outside valid range, use AABB entry point
+        hit_t = tmin;
+    }
+
+    // Check if this hit is closer than existing hit
+    if (hit.t > 0.0f && hit_t >= hit.t) {
+        return false;
+    }
+
+    // Record the hit
+    hit.t = hit_t;
+
+    // Normalize the neural network's normal output
+    float normal_len = sqrtf(normal.x * normal.x + normal.y * normal.y + normal.z * normal.z);
+    if (normal_len > 0.001f) {
+        hit.normal = hiprtFloat3{
+            normal.x / normal_len,
+            normal.y / normal_len,
+            normal.z / normal_len
+        };
+    } else {
+        // Fallback normal if neural output is degenerate
+        hit.normal = hiprtFloat3{0.0f, 1.0f, 0.0f};
+    }
+
+    // Store visibility in UV for potential use in shading
+    hit.uv = hiprtFloat2{visibility, depth};
+
     return true;
 }
 
@@ -646,14 +780,13 @@ extern "C" __global__ void renderKernel(
                (void*)scene, (void*)funcTable, (void*)neural_data);
     }
 
-    // Create traversal object
-    // DEBUG: Try with nullptr payload like the working test
+    // Create traversal object with payload for neural intersection
     hiprtSceneTraversalClosest traversal(
         scene,
         ray,
         hiprtFullRayMask,
         hiprtTraversalHintDefault,
-        nullptr,  // Was &payload - testing without it
+        &payload,  // Pass payload so custom intersection can access neural data
         funcTable,
         RAY_TYPE_PRIMARY,
         0.0f
@@ -677,20 +810,6 @@ extern "C" __global__ void renderKernel(
     // Compute color
     float3 color;
     if (hit.hasHit()) {
-        // DEBUG: Color by instance ID to distinguish mesh from neural hits
-        // Instance 0, 1 = mesh (floor, wall), Instance 2 = neural
-        if (hit.instanceID >= 2) {
-            // Neural hit - bright magenta to be visible
-            color = make_float3(1.0f, 0.0f, 1.0f);
-            uchar4 pixel;
-            pixel.x = (unsigned char)(fminf(fmaxf(color.x, 0.0f), 1.0f) * 255.0f);
-            pixel.y = (unsigned char)(fminf(fmaxf(color.y, 0.0f), 1.0f) * 255.0f);
-            pixel.z = (unsigned char)(fminf(fmaxf(color.z, 0.0f), 1.0f) * 255.0f);
-            pixel.w = 255;
-            frame_buffer[pixel_idx] = pixel;
-            metrics_buffer[pixel_idx] = metrics;
-            return;
-        }
         // Hit position
         float3 hit_pos = make_float3(
             ray.origin.x + hit.t * ray.direction.x,

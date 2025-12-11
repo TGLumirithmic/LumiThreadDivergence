@@ -458,7 +458,7 @@ def generate_scene_yaml(output_path: str,
                         camera_angle: float = 35.0,
                         camera_azimuth: float = 30.0):
     """
-    Generate a scene YAML file.
+    Generate a scene YAML file with all spheres of the same type.
 
     Args:
         output_path: Path to write YAML file
@@ -550,6 +550,146 @@ def generate_scene_yaml(output_path: str,
     print(f"Generated: {output_path}")
 
 
+def generate_mixed_scene_yaml(output_path: str,
+                               spheres: List[Dict[str, Any]],
+                               sphere_types: List[str],
+                               arena_size: float,
+                               wall_height: float,
+                               mesh_file: str,
+                               neural_file: str,
+                               camera_distance: float = None,
+                               fov: float = 90,
+                               aspect_ratio: float = 1.0,
+                               camera_padding: float = 1.2,
+                               use_optimal_camera: bool = True,
+                               camera_angle: float = 35.0,
+                               camera_azimuth: float = 30.0):
+    """
+    Generate a scene YAML file with mixed sphere types.
+
+    Args:
+        output_path: Path to write YAML file
+        spheres: List of sphere configurations
+        sphere_types: List of types per sphere ('mesh' or 'neural_asset')
+        arena_size: Size of the arena
+        wall_height: Height of the walls
+        mesh_file: Path to mesh OBJ file
+        neural_file: Path to neural weights file
+        camera_distance: Distance of camera from origin (deprecated)
+        fov: Camera field of view in degrees (default: 90)
+        aspect_ratio: Image width/height (default: 1.0)
+        camera_padding: Padding factor for camera distance (default: 1.2)
+        use_optimal_camera: Use optimal camera positioning (default: True)
+        camera_angle: Camera elevation angle in degrees (default: 35)
+        camera_azimuth: Camera azimuth angle in degrees (default: 30)
+    """
+    assert len(spheres) == len(sphere_types), "sphere_types must match spheres length"
+
+    # Calculate camera position
+    if use_optimal_camera:
+        cam_pos, look_at = calculate_optimal_camera(
+            spheres, arena_size, wall_height, fov, aspect_ratio, camera_padding,
+            camera_angle, camera_azimuth
+        )
+    else:
+        if camera_distance is None:
+            camera_distance = arena_size * 0.75
+        cam_height = arena_size * 0.4
+        cam_pos = [camera_distance * 0.6, cam_height, camera_distance]
+        look_at = [0.0, arena_size * 0.2, 0.0]
+
+    # Light positioned above the scene
+    light_height = max(wall_height, arena_size * 0.5)
+
+    scene = {
+        'scene': {
+            'camera': {
+                'position': cam_pos,
+                'look_at': look_at,
+                'fov': 90
+            },
+            'light': {
+                'type': 'point',
+                'position': [0.0, light_height, arena_size * 0.3],
+                'color': [1.0, 1.0, 1.0],
+                'intensity': 100.0
+            },
+            'objects': []
+        }
+    }
+
+    # Add floor
+    scene['scene']['objects'].append({
+        'type': 'mesh',
+        'file': 'data/obj/floor.obj'
+    })
+
+    # Add walls
+    scene['scene']['objects'].append({
+        'type': 'mesh',
+        'file': 'data/obj/walls.obj'
+    })
+
+    # Add spheres with their individual types
+    for sphere, stype in zip(spheres, sphere_types):
+        sphere_obj = {
+            'type': stype,
+            'has_bounds': True,
+            'bounds': {
+                'min': sphere['bounds_min'],
+                'max': sphere['bounds_max']
+            },
+            'transform': {
+                'position': sphere['position'],
+                'scale': sphere['scale']
+            }
+        }
+
+        if stype == 'mesh':
+            sphere_obj['file'] = mesh_file
+        else:  # neural_asset
+            sphere_obj['weights'] = neural_file
+
+        scene['scene']['objects'].append(sphere_obj)
+
+    # Write YAML file
+    with open(output_path, 'w') as f:
+        yaml.dump(scene, f, default_flow_style=None, sort_keys=False)
+
+    print(f"Generated: {output_path}")
+
+
+def generate_mixed_configurations(num_spheres: int) -> List[Tuple[int, List[str]]]:
+    """
+    Generate all mixed mesh/neural configurations for a given number of spheres.
+
+    Produces configurations from all-mesh (0 neural) to all-neural (num_spheres neural).
+    Spheres that become neural remain neural in subsequent configurations.
+
+    Args:
+        num_spheres: Total number of spheres
+
+    Returns:
+        List of (num_neural, sphere_types) tuples where sphere_types is a list
+        of 'mesh' or 'neural_asset' for each sphere position
+    """
+    configurations = []
+
+    for num_neural in range(num_spheres + 1):
+        # First num_neural spheres are neural, rest are mesh
+        # This ensures progressive conversion: sphere 0 becomes neural first,
+        # then sphere 1, etc.
+        sphere_types = []
+        for i in range(num_spheres):
+            if i < num_neural:
+                sphere_types.append('neural_asset')
+            else:
+                sphere_types.append('mesh')
+        configurations.append((num_neural, sphere_types))
+
+    return configurations
+
+
 def main():
     parser = argparse.ArgumentParser(
         description='Generate scene files with varying numbers of spheres'
@@ -588,6 +728,8 @@ def main():
                         help='Camera azimuth angle in degrees (default: 30)')
     parser.add_argument('--spread-mode', type=str, default='grid', choices=['grid', 'random'],
                         help='Sphere placement mode: grid (spread out) or random (legacy) (default: grid)')
+    parser.add_argument('--mixed', action='store_true',
+                        help='Generate all mixed mesh/neural configurations (0 to N neural spheres)')
 
     args = parser.parse_args()
 
@@ -622,41 +764,78 @@ def main():
     print(f"Writing walls to {walls_path}")
     write_walls_obj(walls_path, args.arena_size, args.wall_height)
 
-    # Generate mesh scene
-    mesh_scene_path = os.path.join(args.output_dir, f'{args.prefix}_mesh_{args.num_spheres}.yaml')
-    generate_scene_yaml(
-        mesh_scene_path,
-        spheres,
-        args.arena_size,
-        args.wall_height,
-        sphere_type='mesh',
-        sphere_file=args.sphere_obj,
-        camera_padding=args.camera_padding,
-        use_optimal_camera=not args.no_optimal_camera,
-        camera_angle=args.camera_angle,
-        camera_azimuth=args.camera_azimuth
-    )
+    if args.mixed:
+        # Generate all mixed configurations from all-mesh to all-neural
+        configurations = generate_mixed_configurations(len(spheres))
+        generated_files = []
 
-    # Generate neural scene
-    neural_scene_path = os.path.join(args.output_dir, f'{args.prefix}_neural_{args.num_spheres}.yaml')
-    generate_scene_yaml(
-        neural_scene_path,
-        spheres,
-        args.arena_size,
-        args.wall_height,
-        sphere_type='neural_asset',
-        sphere_file=args.weights,
-        camera_padding=args.camera_padding,
-        use_optimal_camera=not args.no_optimal_camera,
-        camera_angle=args.camera_angle,
-        camera_azimuth=args.camera_azimuth
-    )
+        print(f"\nGenerating {len(configurations)} mixed configurations...")
 
-    print(f"\nSuccessfully generated scene pair with {len(spheres)} spheres:")
-    print(f"  Mesh scene:   {mesh_scene_path}")
-    print(f"  Neural scene: {neural_scene_path}")
-    print(f"  Floor:        {floor_path}")
-    print(f"  Walls:        {walls_path}")
+        for num_neural, sphere_types in configurations:
+            num_mesh = len(spheres) - num_neural
+            # Filename format: prefix_mixed_Nmesh_Mneural.yaml
+            scene_path = os.path.join(
+                args.output_dir,
+                f'{args.prefix}_mixed_{num_mesh}mesh_{num_neural}neural.yaml'
+            )
+
+            generate_mixed_scene_yaml(
+                scene_path,
+                spheres,
+                sphere_types,
+                args.arena_size,
+                args.wall_height,
+                mesh_file=args.sphere_obj,
+                neural_file=args.weights,
+                camera_padding=args.camera_padding,
+                use_optimal_camera=not args.no_optimal_camera,
+                camera_angle=args.camera_angle,
+                camera_azimuth=args.camera_azimuth
+            )
+            generated_files.append((scene_path, num_mesh, num_neural))
+
+        print(f"\nSuccessfully generated {len(generated_files)} mixed scenes with {len(spheres)} spheres:")
+        for path, nm, nn in generated_files:
+            print(f"  {nm} mesh, {nn} neural: {path}")
+        print(f"  Floor: {floor_path}")
+        print(f"  Walls: {walls_path}")
+
+    else:
+        # Generate mesh scene
+        mesh_scene_path = os.path.join(args.output_dir, f'{args.prefix}_mesh_{args.num_spheres}.yaml')
+        generate_scene_yaml(
+            mesh_scene_path,
+            spheres,
+            args.arena_size,
+            args.wall_height,
+            sphere_type='mesh',
+            sphere_file=args.sphere_obj,
+            camera_padding=args.camera_padding,
+            use_optimal_camera=not args.no_optimal_camera,
+            camera_angle=args.camera_angle,
+            camera_azimuth=args.camera_azimuth
+        )
+
+        # Generate neural scene
+        neural_scene_path = os.path.join(args.output_dir, f'{args.prefix}_neural_{args.num_spheres}.yaml')
+        generate_scene_yaml(
+            neural_scene_path,
+            spheres,
+            args.arena_size,
+            args.wall_height,
+            sphere_type='neural_asset',
+            sphere_file=args.weights,
+            camera_padding=args.camera_padding,
+            use_optimal_camera=not args.no_optimal_camera,
+            camera_angle=args.camera_angle,
+            camera_azimuth=args.camera_azimuth
+        )
+
+        print(f"\nSuccessfully generated scene pair with {len(spheres)} spheres:")
+        print(f"  Mesh scene:   {mesh_scene_path}")
+        print(f"  Neural scene: {neural_scene_path}")
+        print(f"  Floor:        {floor_path}")
+        print(f"  Walls:        {walls_path}")
 
     # Print some statistics
     if spheres:

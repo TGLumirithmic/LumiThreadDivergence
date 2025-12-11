@@ -27,3 +27,12 @@ target_link_libraries(neural_integration PUBLIC
 set_target_properties(neural_integration PROPERTIES
     POSITION_INDEPENDENT_CODE ON
 )
+
+# Test executable for MLP inference (CPU-only test)
+add_executable(test_mlp_inference test_mlp_inference.cpp)
+target_link_libraries(test_mlp_inference
+    neural_integration
+)
+set_target_properties(test_mlp_inference PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+)

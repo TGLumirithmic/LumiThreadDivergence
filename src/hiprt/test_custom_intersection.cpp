@@ -3,8 +3,31 @@
 #include "scene_builder.h"
 #include "kernel_compiler.h"
 #include <iostream>
+#include <fstream>
 #include <vector>
 #include <cstring>
+
+// Write RGBA frame buffer to PPM file for inspection
+void write_ppm(const char* filename, const unsigned char* data, uint32_t width, uint32_t height) {
+    std::ofstream file(filename, std::ios::binary);
+    if (!file) {
+        std::cerr << "ERROR: Could not open " << filename << " for writing" << std::endl;
+        return;
+    }
+
+    // PPM header (P6 = binary RGB)
+    file << "P6\n" << width << " " << height << "\n255\n";
+
+    // Write RGB data (skip alpha channel)
+    for (uint32_t i = 0; i < width * height; ++i) {
+        file.put(data[i * 4 + 0]);  // R
+        file.put(data[i * 4 + 1]);  // G
+        file.put(data[i * 4 + 2]);  // B
+    }
+
+    file.close();
+    std::cout << "   Wrote " << filename << " (" << width << "x" << height << ")" << std::endl;
+}
 
 // Test kernel source with custom intersection function for AABBs
 // Uses only HIPRT types to avoid undefined symbol issues
@@ -24,6 +47,13 @@ __device__ bool intersectCustomAABB(
     void* payload,
     hiprtHit& hit
 ) {
+    // DEBUG: Print once per warp to verify function is called
+    int lane = threadIdx.x & 31;
+    if (lane == 0 && blockIdx.x == 0 && blockIdx.y == 0) {
+        printf("intersectCustomAABB called! primID=%d data=%p ray.origin=(%f,%f,%f)\\n",
+               hit.primID, data, ray.origin.x, ray.origin.y, ray.origin.z);
+    }
+
     // Data contains AABB bounds: [min_x, min_y, min_z, max_x, max_y, max_z] per primitive
     const float* aabb_data = reinterpret_cast<const float*>(data);
     const uint32_t prim_offset = hit.primID * 6;
@@ -139,6 +169,15 @@ extern "C" __global__ void customIntersectKernel(
 
     hiprtHit hit = traversal.getNextHit();
 
+    // DEBUG: Print for center pixel
+    if (x == 64 && y == 64) {
+        printf("DEBUG: Pixel (64,64) ray origin=(%f,%f,%f) dir=(%f,%f,%f)\\n",
+               ray.origin.x, ray.origin.y, ray.origin.z,
+               ray.direction.x, ray.direction.y, ray.direction.z);
+        printf("DEBUG: Pixel (64,64) hit=%d instanceID=%d primID=%d t=%f\\n",
+               hit.hasHit() ? 1 : 0, hit.instanceID, hit.primID, hit.t);
+    }
+
     // Shading
     unsigned char r, g, b, a;
     if (hit.hasHit()) {
@@ -180,7 +219,7 @@ int main() {
     hiprt::GeometryBuilder geom_builder(context);
 
     std::vector<hiprt::AABB> aabbs = {
-        {-0.5f, -0.5f, -0.5f, 0.5f, 0.5f, 0.5f}  // Unit cube centered at origin
+        {-0.75f, -0.75f, -0.75f, 0.75f, 0.75f, 0.75f}  // Unit cube centered at origin
     };
 
     std::cout << "1. Building AABB geometry..." << std::endl;
@@ -234,7 +273,7 @@ int main() {
         "intersectCustomAABB",  // Custom intersection function
         nullptr,                 // No filter function
         2,                       // 2 geometry types (0=triangles, 1=custom/neural)
-        1                        // 1 ray type
+        2                        // 2 ray types (like main renderer)
     );
 
     if (!compiled.valid()) {
@@ -328,6 +367,9 @@ int main() {
         (oroDeviceptr)d_frame_buffer,
         buffer_size
     ));
+
+    // Save output image
+    write_ppm("custom_intersect_test.ppm", frame_buffer.data(), width, height);
 
     // Count non-background pixels
     int hit_pixels = 0;

@@ -19,12 +19,9 @@ for count in "${SPHERE_COUNTS[@]}"; do
     echo ""
     echo "Generating scenes with $count spheres..."
     python3 generate_scenes.py $count \
-        --arena-size $ARENA_SIZE \
-        --wall-height $WALL_HEIGHT \
-        --min-radius $MIN_RADIUS \
-        --max-radius $MAX_RADIUS \
         --seed $SEED \
-        --prefix scene
+        --output-dir scenes \
+        --camera-padding 2
 
     if [ $? -ne 0 ]; then
         echo "Error generating scene with $count spheres"

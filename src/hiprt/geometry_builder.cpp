@@ -144,6 +144,8 @@ GeometryHandle GeometryBuilder::build_aabb_geometry(
     for (size_t i = 0; i < aabbs.size(); ++i) {
         aabb_data[i * 2 + 0] = {aabbs[i].min_x, aabbs[i].min_y, aabbs[i].min_z, 0.0f};
         aabb_data[i * 2 + 1] = {aabbs[i].max_x, aabbs[i].max_y, aabbs[i].max_z, 0.0f};
+        std::cout << "  AABB[" << i << "]: min=(" << aabbs[i].min_x << "," << aabbs[i].min_y << "," << aabbs[i].min_z
+                  << ") max=(" << aabbs[i].max_x << "," << aabbs[i].max_y << "," << aabbs[i].max_z << ")" << std::endl;
     }
 
     // Allocate device memory for AABBs
@@ -156,45 +158,56 @@ GeometryHandle GeometryBuilder::build_aabb_geometry(
                             const_cast<void*>(static_cast<const void*>(aabb_data.data())),
                             aabbs_size));
 
-    // Setup AABB list input - zero-initialize
-    hiprtAABBListPrimitive aabbList{};
-    aabbList.aabbs = d_aabbs;  // hiprtDevicePtr is void*
+    // Setup AABB list input - use memset for complete zero-initialization
+    hiprtAABBListPrimitive aabbList;
+    std::memset(&aabbList, 0, sizeof(hiprtAABBListPrimitive));
+    aabbList.aabbs = d_aabbs;
     aabbList.aabbCount = static_cast<uint32_t>(aabbs.size());
     aabbList.aabbStride = 2 * sizeof(hiprtFloat4);  // Each AABB is 2 float4s
 
-    // Setup geometry build input - zero-initialize (has union + nodeList)
-    hiprtGeometryBuildInput geomInput{};
+    // Setup geometry build input - use memset for complete zero-initialization
+    // This is critical: the union and all fields must be properly zeroed
+    hiprtGeometryBuildInput geomInput;
+    std::memset(&geomInput, 0, sizeof(hiprtGeometryBuildInput));
     geomInput.type = hiprtPrimitiveTypeAABBList;
     geomInput.primitive.aabbList = aabbList;
     geomInput.geomType = geom_type;  // Custom geometry type for neural assets
 
     // Get build sizes
-    hiprtBuildOptions buildOptions{};
-    buildOptions.buildFlags = get_build_flags(quality);
+    hiprtBuildOptions buildOptions;
+    std::memset(&buildOptions, 0, sizeof(hiprtBuildOptions));
+    // Use fast build to ensure internal deep copy of AABB data
+    buildOptions.buildFlags = hiprtBuildFlagBitPreferFastBuild;
 
     size_t geomTempSize = 0;
     hiprtDevicePtr geomTemp = nullptr;
 
+    std::cout << "  Getting AABB geometry temp buffer size..." << std::endl;
     HIPRT_CHECK(hiprtGetGeometryBuildTemporaryBufferSize(
         context_.get_context(), geomInput, buildOptions, geomTempSize));
+    std::cout << "  AABB temp buffer size: " << geomTempSize << " bytes" << std::endl;
 
     // Allocate temporary buffer
     ensure_temp_buffer(geomTempSize);
     geomTemp = temp_buffer_;
 
     // Create and build geometry
+    std::cout << "  Creating AABB geometry (geomType=" << geom_type << ")..." << std::endl;
     hiprtGeometry geometry = nullptr;
     HIPRT_CHECK(hiprtCreateGeometry(
         context_.get_context(), geomInput, buildOptions, geometry));
+    std::cout << "  AABB geometry created" << std::endl;
 
+    std::cout << "  Building AABB geometry..." << std::endl;
     HIPRT_CHECK(hiprtBuildGeometry(
         context_.get_context(), hiprtBuildOperationBuild,
         geomInput, buildOptions, geomTemp, context_.get_api_stream(), geometry));
+    std::cout << "  AABB geometry built" << std::endl;
 
     // Synchronize to ensure build is complete
     context_.synchronize();
 
-    // Free device buffers (geometry retains its own copy)
+    // Free device buffers - safe with hiprtBuildFlagBitPreferFastBuild which deep copies
     oroFree((oroDeviceptr)d_aabbs);
 
     std::cout << "Built AABB geometry: " << aabbs.size() << " AABBs, geomType=" << geom_type << std::endl;

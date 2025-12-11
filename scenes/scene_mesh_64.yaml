@@ -7,7 +7,7 @@ scene:
     type: point
     position: [0.0, 5.0, 3.0]
     color: [1.0, 1.0, 1.0]
-    intensity: 1000.0
+    intensity: 100.0
   objects:
   - {type: mesh, file: data/obj/floor.obj}
   - {type: mesh, file: data/obj/walls.obj}

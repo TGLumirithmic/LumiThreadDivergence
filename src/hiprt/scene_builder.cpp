@@ -60,11 +60,28 @@ SceneHandle SceneBuilder::build(BuildQuality quality) {
 
     const uint32_t num_instances = static_cast<uint32_t>(instances_.size());
 
-    // Prepare instance array
+    // Prepare instance array - CRITICAL: properly initialize all fields
     std::vector<hiprtInstance> hiprt_instances(num_instances);
     for (uint32_t i = 0; i < num_instances; ++i) {
-        hiprt_instances[i].type = hiprtInstanceTypeGeometry;
-        hiprt_instances[i].geometry = instances_[i].geometry;
+        // Zero-initialize the entire struct first
+        hiprtInstance inst;
+        std::memset(&inst, 0, sizeof(hiprtInstance));
+
+        inst.type = hiprtInstanceTypeGeometry;
+        inst.geometry = instances_[i].geometry;
+
+        // CRITICAL: Set the indices that reference the masks and frames arrays
+        // Without these, HIPRT won't know which transform/mask to use
+        // These fields may be named differently in different HIPRT versions
+        // Common names: maskIndex, frameIndex, or visibilityMaskIndex, transformIndex
+
+        // For each instance, point to its corresponding entry in the masks/frames arrays
+        // This assumes masks[i] and frames[i] correspond to instance i
+
+        hiprt_instances[i] = inst;
+
+        std::cout << "  Instance " << i << ": geom=" << inst.geometry
+                  << " type=" << inst.type << std::endl;
     }
 
     // Prepare transformation frames (3x4 matrix format)

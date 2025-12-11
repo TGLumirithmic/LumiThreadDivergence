@@ -152,3 +152,17 @@ set_target_properties(test_two_planes PROPERTIES
     BUILD_RPATH ${HIPRT_LIB_DIR}
     INSTALL_RPATH ${HIPRT_LIB_DIR}
 )
+
+# Test executable for mixed geometry (triangles + custom AABB)
+add_executable(test_mixed_geometry test_mixed_geometry.cpp)
+target_link_libraries(test_mixed_geometry
+    hiprt_host
+    ${HIPRT_LIBRARY}
+    CUDA::cudart
+    CUDA::cuda_driver
+    ${CMAKE_DL_LIBS}
+)
+set_target_properties(test_mixed_geometry PROPERTIES
+    BUILD_RPATH ${HIPRT_LIB_DIR}
+    INSTALL_RPATH ${HIPRT_LIB_DIR}
+)
