@@ -154,6 +154,47 @@ RUN pip3 install --no-cache-dir \
     pillow \
     pyyaml
 
+# Clone and build HIPRT with NVIDIA/CUDA support via Orochi
+# HIPRT automatically detects CUDA through Orochi when available
+# For NVIDIA-only builds: compile bitcode with --no-amd --nvidia flags
+WORKDIR /opt
+RUN git clone --recursive https://github.com/GPUOpen-LibrariesAndSDKs/HIPRT.git /opt/hiprt-src && \
+    cd /opt/hiprt-src && \
+    mkdir -p build && \
+    # Configure with BITCODE=ON to enable precompiled kernel support
+    cmake -S . -B build \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DBITCODE=ON \
+        -DNO_UNITTEST=ON \
+        -DCMAKE_INSTALL_PREFIX=/opt/hiprt && \
+    # Build the library
+    cmake --build build --config Release -j $(nproc) && \
+    # Compile NVIDIA bitcode kernels (--no-amd to skip AMD, --nvidia to enable NVIDIA)
+    cd /opt/hiprt-src/scripts/bitcodes && \
+    python3 compile.py --no-amd --nvidia && \
+    cd /opt/hiprt-src && \
+    # Manual install since HIPRT doesn't have a standard install target
+    mkdir -p /opt/hiprt/include /opt/hiprt/lib /opt/hiprt/bin && \
+    # Copy main headers
+    cp -r /opt/hiprt-src/hiprt/*.h /opt/hiprt/include/ && \
+    # Copy implementation headers (needed for custom intersect functions)
+    mkdir -p /opt/hiprt/include/hiprt && \
+    cp -r /opt/hiprt-src/hiprt/impl /opt/hiprt/include/hiprt/ && \
+    # Copy Orochi headers and sources (needed for CUDA/HIP abstraction)
+    cp -r /opt/hiprt-src/contrib/Orochi /opt/hiprt/include/ && \
+    # Copy contrib directory (cuew/hipew for CUDA/HIP wrappers)
+    cp -r /opt/hiprt-src/contrib /opt/hiprt/include/ && \
+    # Copy built library (look for versioned library name)
+    find /opt/hiprt-src/build -name "libhiprt*.so*" -exec cp {} /opt/hiprt/lib/ \; && \
+    # Copy compiled bitcode/fatbin files if they exist
+    find /opt/hiprt-src -name "*.hipfb" -exec cp {} /opt/hiprt/bin/ \; 2>/dev/null || true && \
+    find /opt/hiprt-src -name "*nvidia*.fatbin" -exec cp {} /opt/hiprt/bin/ \; 2>/dev/null || true && \
+    # Create symlink if needed
+    cd /opt/hiprt/lib && \
+    if [ -f libhiprt0300064.so ]; then ln -sf libhiprt0300064.so libhiprt.so; fi && \
+    # Cleanup source to save space
+    rm -rf /opt/hiprt-src
+
 # Copy OptiX SDK from builder
 COPY --from=builder /opt/optix /opt/optix
 
@@ -166,7 +207,8 @@ RUN ldconfig
 # Environment variables
 ENV OptiX_INSTALL_DIR=/opt/optix
 ENV TCNN_DIR=/opt/tiny-cuda-nn/
-ENV LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
+ENV HIPRT_DIR=/opt/hiprt
+ENV LD_LIBRARY_PATH=/opt/hiprt/lib:/usr/local/lib:$LD_LIBRARY_PATH
 ENV PATH=/usr/local/cuda/bin:$PATH
 
 # Create non-root user
