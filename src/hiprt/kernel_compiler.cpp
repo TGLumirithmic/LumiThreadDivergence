@@ -27,7 +27,8 @@ CompiledKernel KernelCompiler::compile(
     const char* filter_func_name,
     uint32_t num_geom_types,
     uint32_t num_ray_types,
-    const std::vector<std::string>& compile_options
+    const std::vector<std::string>& compile_options,
+    const char* module_name
 ) {
     std::cout << "Compiling kernel: " << kernel_name << std::endl;
     if (intersect_func_name) {
@@ -104,7 +105,7 @@ CompiledKernel KernelCompiler::compile(
         1,                              // numFunctions
         func_names,                     // funcNames
         kernel_source,                  // src
-        "render_kernel",                // moduleName
+        module_name,                    // moduleName (use full path for ncu source correlation)
         static_cast<uint32_t>(headers_.size()),  // numHeaders
         header_sources.empty() ? nullptr : header_sources.data(),  // headers
         header_names.empty() ? nullptr : header_names.data(),      // includeNames

@@ -99,6 +99,7 @@ public:
      * @param num_geom_types Number of geometry types (triangle=0, neural=1, etc.)
      * @param num_ray_types Number of ray types (primary=0, shadow=1, etc.)
      * @param compile_options Additional compiler options
+     * @param module_name Module name for debug info (use full path for ncu source correlation)
      * @return Compiled kernel handle
      */
     CompiledKernel compile(
@@ -108,7 +109,8 @@ public:
         const char* filter_func_name = nullptr,
         uint32_t num_geom_types = 2,
         uint32_t num_ray_types = 2,
-        const std::vector<std::string>& compile_options = {}
+        const std::vector<std::string>& compile_options = {},
+        const char* module_name = "render_kernel"
     );
 
     /**

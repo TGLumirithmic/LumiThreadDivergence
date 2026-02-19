@@ -32,9 +32,6 @@
 #include "neural/weight_loader.h"
 #include "neural/config.h"
 
-// Divergence metric count for output (11 uint32 fields + instance_entropy as fixed-point = 12 total)
-#define NUM_DIVERGENCE_METRICS 12
-
 // =============================================================================
 // Neural Network Types (must match kernel_source.h exactly)
 // =============================================================================
@@ -78,22 +75,6 @@ struct float3_kernel {
     float x, y, z;
 };
 
-// This must match TraversalMetrics in kernel_source.h
-struct TraversalMetrics {
-    uint32_t traversal_steps;
-    uint32_t node_divergence;
-    uint32_t triangle_tests;
-    uint32_t triangle_divergence;
-    uint32_t neural_tests;
-    uint32_t neural_divergence;
-    uint32_t early_reject_divergence;
-    uint32_t hash_divergence;
-    uint32_t mlp_divergence;
-    uint32_t shadow_tests;
-    uint32_t shadow_divergence;
-    float instance_entropy;
-};
-
 struct NeuralAssetData {
     float3_kernel* aabb_min;
     float3_kernel* aabb_max;
@@ -101,7 +82,6 @@ struct NeuralAssetData {
     uint32_t num_assets;
     int32_t* instance_to_neural_idx;
     uint32_t max_instance_id;
-    TraversalMetrics* metrics;
 };
 
 // =============================================================================
@@ -585,14 +565,14 @@ int main(int argc, char** argv) {
     std::string output_file = "output/hiprt_render.ppm";
     int width = 512;
     int height = 512;
-    bool enable_divergence = true;
+    bool enable_shadows = true;
 
     // Parse positional and flag arguments
     int positional_idx = 0;
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
-        if (arg == "--no-divergence" || arg == "-D") {
-            enable_divergence = false;
+        if (arg == "--no-shadows" || arg == "-S") {
+            enable_shadows = false;
         } else {
             // Positional arguments: scene, output, width, height
             switch (positional_idx) {
@@ -606,8 +586,8 @@ int main(int argc, char** argv) {
     }
 
     if (scene_file.empty()) {
-        std::cerr << "Usage: " << argv[0] << " <scene.yaml> [output.ppm] [width] [height] [--no-divergence|-D]" << std::endl;
-        std::cerr << "  --no-divergence, -D  Disable divergence measurement output" << std::endl;
+        std::cerr << "Usage: " << argv[0] << " <scene.yaml> [output.ppm] [width] [height] [--no-shadows|-S]" << std::endl;
+        std::cerr << "  --no-shadows, -S     Disable shadow rays" << std::endl;
         return 1;
     }
 
@@ -615,7 +595,7 @@ int main(int argc, char** argv) {
     std::cout << "  Scene file: " << scene_file << std::endl;
     std::cout << "  Output: " << output_file << std::endl;
     std::cout << "  Resolution: " << width << "x" << height << std::endl;
-    std::cout << "  Divergence measurement: " << (enable_divergence ? "enabled" : "disabled") << std::endl;
+    std::cout << "  Shadow rays: " << (enable_shadows ? "enabled" : "disabled") << std::endl;
 
     // Load YAML scene
     YAML::Node root;
@@ -912,13 +892,31 @@ int main(int argc, char** argv) {
     const char* intersect_func = has_neural_assets ? getIntersectFuncName() : nullptr;
     int num_geom_types = has_neural_assets ? 2 : 1;
 
+    // Enable line info by default for profiling with ncu
+    // Note: -G (full debug) breaks NVRTC compilation, so we only use -lineinfo
+    std::vector<std::string> compile_options;
+    #ifndef NDEBUG
+    std::cout << "COMPILER: Adding debug flag (-G) to kernel compilation" << std::endl;
+    compile_options.push_back("-G");
+    #endif
+    compile_options.push_back("-lineinfo"); // Line number info for source correlation
+
+    const char* kernel_source = getKernelSource();
+
+    // Use full path as module name so ncu can find the source
+    // The kernel source file is generated at build time by CMake (cmake/extract_kernel_source.cmake)
+    // This avoids permissions issues when running ncu as root
+    static const char* kernel_file_path = "/workspaces/LumiThreadDivergence/render_kernel";
+
     auto compiled = compiler.compile(
-        getKernelSource(),
+        kernel_source,
         getRenderKernelName(),
         intersect_func,
         nullptr,  // No filter function
         num_geom_types,
-        2  // 2 ray types (primary + shadow)
+        2,  // 2 ray types (primary + shadow)
+        compile_options,
+        kernel_file_path
     );
 
     if (!compiled.valid()) {
@@ -930,15 +928,6 @@ int main(int argc, char** argv) {
     void* d_frame_buffer = nullptr;
     size_t frame_buffer_size = width * height * 4;  // RGBA
     ORO_CHECK(oroMalloc(&d_frame_buffer, frame_buffer_size));
-
-    // Allocate metrics buffer (only if divergence measurement is enabled)
-    void* d_metrics_buffer = nullptr;
-    if (enable_divergence) {
-        // TraversalMetrics has 11 uint32_t fields + 1 float (12 * 4 = 48 bytes)
-        size_t metrics_size = width * height * 48;
-        ORO_CHECK(oroMalloc(&d_metrics_buffer, metrics_size));
-        ORO_CHECK(oroMemset((oroDeviceptr)d_metrics_buffer, 0, metrics_size));
-    }
 
     // Set up camera
     Camera camera;
@@ -1061,7 +1050,6 @@ int main(int argc, char** argv) {
         h_neural_data.num_assets = (uint32_t)num_neural;
         h_neural_data.instance_to_neural_idx = (int32_t*)d_instance_to_neural_idx;
         h_neural_data.max_instance_id = (uint32_t)h_instance_to_neural.size();
-        h_neural_data.metrics = (TraversalMetrics*)d_metrics_buffer;  // Share metrics buffer
 
         ORO_CHECK(oroMalloc(&d_neural_asset_data, sizeof(NeuralAssetData)));
         ORO_CHECK(oroMemcpyHtoD((oroDeviceptr)d_neural_asset_data,
@@ -1126,6 +1114,7 @@ int main(int argc, char** argv) {
 
     uint32_t w = width;
     uint32_t h = height;
+    uint32_t shadows_flag = enable_shadows ? 1 : 0;
 
     void* kernel_args[] = {
         &scene_handle,
@@ -1136,9 +1125,9 @@ int main(int argc, char** argv) {
         &camera,
         &light,
         &d_frame_buffer,
-        &d_metrics_buffer,
         &w,
-        &h
+        &h,
+        &shadows_flag
     };
 
     unsigned int block_x = 8, block_y = 8, block_z = 1;
@@ -1165,104 +1154,12 @@ int main(int argc, char** argv) {
         std::cerr << "Kernel launch failed: " << launch_err << std::endl;
         oroStreamDestroy(stream);
         oroFree((oroDeviceptr)d_frame_buffer);
-        oroFree((oroDeviceptr)d_metrics_buffer);
         return 1;
     }
 
     ORO_CHECK(oroStreamSynchronize(stream));
 
     std::cout << "Rendering complete!" << std::endl;
-
-    // Download and output divergence metrics (if enabled)
-    if (enable_divergence && d_metrics_buffer) {
-        std::vector<TraversalMetrics> h_metrics(width * height);
-        ORO_CHECK(oroMemcpyDtoH(h_metrics.data(), (oroDeviceptr)d_metrics_buffer,
-                               width * height * sizeof(TraversalMetrics)));
-
-        // Write divergence metrics to binary file
-        std::string div_file = output_file;
-        size_t dot_pos = div_file.rfind('.');
-        if (dot_pos != std::string::npos) {
-            div_file = div_file.substr(0, dot_pos) + "_divergence.bin";
-        } else {
-            div_file += "_divergence.bin";
-        }
-
-        std::ofstream div_bin_file(div_file, std::ios::binary);
-        if (div_bin_file.is_open()) {
-            // Write header: [width, height, num_metrics]
-            // NUM_DIVERGENCE_METRICS = 12 (11 uint32 fields + instance_entropy as fixed-point ×1000)
-            uint32_t header[3] = {(uint32_t)width, (uint32_t)height, NUM_DIVERGENCE_METRICS};
-            div_bin_file.write(reinterpret_cast<const char*>(header), 3 * sizeof(uint32_t));
-
-            // Write metrics as flat uint32 array (compatible with analyze_divergence.py)
-            // Convert instance_entropy float to fixed-point (×1000) as expected by the script
-            std::vector<uint32_t> flat_metrics(width * height * NUM_DIVERGENCE_METRICS);
-            for (int i = 0; i < width * height; ++i) {
-                const auto& m = h_metrics[i];
-                uint32_t* out = &flat_metrics[i * NUM_DIVERGENCE_METRICS];
-                out[0]  = m.traversal_steps;
-                out[1]  = m.node_divergence;
-                out[2]  = m.triangle_tests;
-                out[3]  = m.triangle_divergence;
-                out[4]  = m.neural_tests;
-                out[5]  = m.neural_divergence;
-                out[6]  = m.early_reject_divergence;
-                out[7]  = m.hash_divergence;
-                out[8]  = m.mlp_divergence;
-                out[9]  = m.shadow_tests;
-                out[10] = m.shadow_divergence;
-                out[11] = (uint32_t)(m.instance_entropy * 1000.0f);  // Fixed-point ×1000
-            }
-            div_bin_file.write(reinterpret_cast<const char*>(flat_metrics.data()),
-                               flat_metrics.size() * sizeof(uint32_t));
-            div_bin_file.close();
-            std::cout << "Wrote divergence metrics to: " << div_file << std::endl;
-        }
-
-        // Print divergence summary statistics
-        uint64_t total_traversal_steps = 0;
-        uint64_t total_node_divergence = 0;
-        uint64_t total_triangle_tests = 0;
-        uint64_t total_triangle_divergence = 0;
-        uint64_t total_neural_tests = 0;
-        uint64_t total_neural_divergence = 0;
-        uint64_t total_early_reject_divergence = 0;
-        uint64_t total_hash_divergence = 0;
-        uint64_t total_mlp_divergence = 0;
-        uint64_t total_shadow_tests = 0;
-        uint64_t total_shadow_divergence = 0;
-        double total_instance_entropy = 0.0;
-
-        for (const auto& m : h_metrics) {
-            total_traversal_steps += m.traversal_steps;
-            total_node_divergence += m.node_divergence;
-            total_triangle_tests += m.triangle_tests;
-            total_triangle_divergence += m.triangle_divergence;
-            total_neural_tests += m.neural_tests;
-            total_neural_divergence += m.neural_divergence;
-            total_early_reject_divergence += m.early_reject_divergence;
-            total_hash_divergence += m.hash_divergence;
-            total_mlp_divergence += m.mlp_divergence;
-            total_shadow_tests += m.shadow_tests;
-            total_shadow_divergence += m.shadow_divergence;
-            total_instance_entropy += m.instance_entropy;
-        }
-
-        std::cout << "\n=== Divergence Metrics Summary ===" << std::endl;
-        std::cout << "  Traversal steps:        " << total_traversal_steps << std::endl;
-        std::cout << "  Node divergence:        " << total_node_divergence << std::endl;
-        std::cout << "  Triangle tests:         " << total_triangle_tests << std::endl;
-        std::cout << "  Triangle divergence:    " << total_triangle_divergence << std::endl;
-        std::cout << "  Neural tests:           " << total_neural_tests << std::endl;
-        std::cout << "  Neural divergence:      " << total_neural_divergence << std::endl;
-        std::cout << "  Early reject div:       " << total_early_reject_divergence << std::endl;
-        std::cout << "  Hash divergence:        " << total_hash_divergence << std::endl;
-        std::cout << "  MLP divergence:         " << total_mlp_divergence << std::endl;
-        std::cout << "  Shadow tests:           " << total_shadow_tests << std::endl;
-        std::cout << "  Shadow divergence:      " << total_shadow_divergence << std::endl;
-        std::cout << "  Avg instance entropy:   " << (total_instance_entropy / (width * height)) << std::endl;
-    }
 
     // Download and save image
     std::vector<unsigned char> h_frame_buffer(frame_buffer_size);
@@ -1273,7 +1170,6 @@ int main(int argc, char** argv) {
     // Cleanup
     oroStreamDestroy(stream);
     oroFree((oroDeviceptr)d_frame_buffer);
-    if (d_metrics_buffer) oroFree((oroDeviceptr)d_metrics_buffer);
 
     // Free mesh normal data GPU buffers
     for (const auto& gpu : gpu_mesh_data) {

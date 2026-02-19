@@ -22,6 +22,10 @@ inline const char* getKernelSource() {
 // ============================================================================
 #include <hiprt/hiprt_device.h>
 
+// Reset line numbering for ncu source correlation
+// This tells NVRTC to map subsequent code back to our render_kernel file
+#line 10 "/workspaces/LumiThreadDivergence/render_kernel"
+
 // ============================================================================
 // CUDA/HIP vector types
 // ============================================================================
@@ -41,75 +45,6 @@ inline const char* getKernelSource() {
 #define RAY_TYPE_PRIMARY 0
 #define RAY_TYPE_SHADOW  1
 
-// ============================================================================
-// Divergence Profiling Utilities
-// ============================================================================
-
-// Measure divergence at a branch point using warp ballot
-// Returns the number of threads that diverge (take the minority path)
-__device__ __forceinline__ uint32_t measure_divergence(bool condition) {
-    // Get active mask for current warp
-    unsigned int active_mask = __activemask();
-
-    // Ballot: which threads satisfy the condition?
-    unsigned int ballot = __ballot_sync(active_mask, condition);
-
-    // Count threads taking each path
-    unsigned int true_count = __popc(ballot);
-    unsigned int false_count = __popc(active_mask) - true_count;
-
-    // Divergence = min(true_count, false_count)
-    // This measures "wasted work" from divergence
-    return min(true_count, false_count);
-}
-
-// Calculate entropy of instance IDs within a warp (spatial coherence metric)
-__device__ __forceinline__ float warpInstanceEntropy(int instanceID) {
-    unsigned mask = __activemask();
-    int lane = threadIdx.x & 31;
-    int activeCount = __popc(mask);
-
-    if (activeCount <= 1) return 0.0f;
-
-    float entropy = 0.0f;
-
-    for (int leader = 0; leader < 32; ++leader) {
-        if ((mask & (1u << leader)) == 0) continue;
-
-        int leaderID = __shfl_sync(mask, instanceID, leader);
-        unsigned groupMask = __ballot_sync(mask, instanceID == leaderID);
-        int groupLeader = __ffs(groupMask) - 1;
-
-        if (lane == leader && leader == groupLeader) {
-            int groupSize = __popc(groupMask);
-            float p = float(groupSize) / float(activeCount);
-            entropy += -p * log2f(p);
-        }
-    }
-
-    int firstLane = __ffs(mask) - 1;
-    entropy = __shfl_sync(mask, entropy, firstLane);
-    return entropy;
-}
-
-// ============================================================================
-// Traversal Metrics Structure
-// ============================================================================
-
-struct TraversalMetrics {
-    uint32_t traversal_steps;
-    uint32_t node_divergence;
-    uint32_t triangle_tests;
-    uint32_t triangle_divergence;
-    uint32_t neural_tests;
-    uint32_t neural_divergence;
-    uint32_t early_reject_divergence;
-    uint32_t hash_divergence;
-    uint32_t mlp_divergence;
-    uint32_t shadow_tests;
-    uint32_t shadow_divergence;
-    float instance_entropy;
-};
 
 // ============================================================================
 // Hash Grid Encoding Parameters
@@ -168,18 +103,6 @@ struct NeuralAssetData {
     // Mapping from scene instance ID to neural asset index (-1 for non-neural instances)
     int32_t* instance_to_neural_idx;
     uint32_t max_instance_id;  // For bounds checking
-
-    // Metrics buffer for divergence tracking (unused, kept for compatibility)
-    TraversalMetrics* metrics;
-};
-
-// ============================================================================
-// Traversal Payload (passed through HIPRT traversal)
-// ============================================================================
-
-struct TraversalPayload {
-    TraversalMetrics* metrics;
-    NeuralAssetData* neural_data;
 };
 
 // ============================================================================
@@ -212,8 +135,7 @@ __device__ __forceinline__ uint32_t hash_grid_index(
 __device__ __forceinline__ void hash_encode(
     const float3& position,
     const HashGridParams& params,
-    float* output,
-    TraversalMetrics* metrics
+    float* output
 ) {
     for (uint32_t level = 0; level < params.n_levels; ++level) {
         float scale = params.base_resolution * powf(params.per_level_scale, (float)level) - 1.0f;
@@ -247,11 +169,6 @@ __device__ __forceinline__ void hash_encode(
                 uint32_t dz = (i & 4) >> 2;
 
                 bool use_direct_index = (grid_volume <= hashmap_size);
-
-                // Track hash vs direct indexing divergence
-                if (metrics != nullptr) {
-                    metrics->hash_divergence += measure_divergence(use_direct_index);
-                }
 
                 uint32_t hash_idx;
                 if (use_direct_index) {
@@ -313,8 +230,7 @@ __device__ __forceinline__ void mlp_forward(
     const float* input,
     const MLPParams& params,
     float* output,
-    float* scratch,
-    TraversalMetrics* metrics
+    float* scratch
 ) {
     const float* current_input = input;
     float* layer_output = scratch;
@@ -326,11 +242,6 @@ __device__ __forceinline__ void mlp_forward(
                         layer_output, layer.in_dim, layer.out_dim);
 
         bool is_hidden_layer = (l < params.n_layers - 1);
-
-        // Track hidden vs output layer divergence
-        if (metrics != nullptr) {
-            metrics->mlp_divergence += measure_divergence(is_hidden_layer);
-        }
 
         if (is_hidden_layer) {
             apply_activation(layer_output, layer.out_dim, 'R');
@@ -358,14 +269,13 @@ __device__ __forceinline__ void neural_inference(
     const NeuralNetworkParams& net_params,
     float& visibility,
     float3& normal,
-    float& depth,
-    TraversalMetrics* metrics
+    float& depth
 ) {
     float scratch[512];
 
     // Hash encode position
     float* position_encoding = scratch;
-    hash_encode(position, net_params.hash_encoding, position_encoding, metrics);
+    hash_encode(position, net_params.hash_encoding, position_encoding);
     uint32_t pos_encoding_dim = net_params.hash_encoding.n_levels *
                                 net_params.hash_encoding.n_features_per_level;
 
@@ -378,7 +288,7 @@ __device__ __forceinline__ void neural_inference(
 
     float* direction_encoding = scratch + 80;
     float* dir_scratch = scratch + 96;
-    mlp_forward(direction_input, net_params.direction_encoder, direction_encoding, dir_scratch, metrics);
+    mlp_forward(direction_input, net_params.direction_encoder, direction_encoding, dir_scratch);
 
     // Concatenate encodings
     float* concatenated = scratch + 240;
@@ -395,17 +305,17 @@ __device__ __forceinline__ void neural_inference(
 
     // Visibility decoder
     float vis_output[16];
-    mlp_forward(concatenated, net_params.visibility_decoder, vis_output, decoder_scratch, metrics);
+    mlp_forward(concatenated, net_params.visibility_decoder, vis_output, decoder_scratch);
     visibility = vis_output[0];
 
     // Normal decoder
     float norm_output[16];
-    mlp_forward(concatenated, net_params.normal_decoder, norm_output, decoder_scratch, metrics);
+    mlp_forward(concatenated, net_params.normal_decoder, norm_output, decoder_scratch);
     normal = make_float3(norm_output[0], norm_output[1], norm_output[2]);
 
     // Depth decoder
     float depth_output[16];
-    mlp_forward(concatenated, net_params.depth_decoder, depth_output, decoder_scratch, metrics);
+    mlp_forward(concatenated, net_params.depth_decoder, depth_output, decoder_scratch);
     depth = depth_output[0];
 }
 
@@ -513,15 +423,8 @@ __device__ bool intersectNeuralAABB(
         return false;
     }
 
-    // Get payload for neural network parameters and metrics
-    TraversalPayload* trav_payload = reinterpret_cast<TraversalPayload*>(payload);
-    NeuralAssetData* neural_data = (trav_payload != nullptr) ? trav_payload->neural_data : nullptr;
-    TraversalMetrics* metrics = (trav_payload != nullptr) ? trav_payload->metrics : nullptr;
-
-    // Track neural intersection test
-    if (metrics != nullptr) {
-        metrics->neural_tests++;
-    }
+    // Get neural data from payload
+    NeuralAssetData* neural_data = reinterpret_cast<NeuralAssetData*>(payload);
 
     // If no neural data available, fall back to simple AABB intersection
     if (neural_data == nullptr || neural_data->neural_params == nullptr) {
@@ -623,22 +526,13 @@ __device__ bool intersectNeuralAABB(
         net_params,
         visibility,
         normal,
-        depth,
-        metrics
+        depth
     );
 
-    // Track divergence in visibility decisions
+    // Check if neural network predicts a hit
     const float VIS_THRESHOLD = 0.5f;
     bool is_hit = (visibility >= VIS_THRESHOLD);
-    if (metrics != nullptr) {
-        metrics->neural_divergence += measure_divergence(is_hit);
-    }
-
-    // Check if neural network predicts a hit
     if (!is_hit) {
-        if (metrics != nullptr) {
-            metrics->early_reject_divergence += measure_divergence(true);
-        }
         return false;
     }
 
@@ -757,9 +651,9 @@ extern "C" __global__ void renderKernel(
     CameraParams camera,
     LightParams light,
     uchar4* frame_buffer,
-    TraversalMetrics* metrics_buffer,
     uint32_t width,
-    uint32_t height
+    uint32_t height,
+    uint32_t enable_shadows
 ) {
     const uint32_t x = blockIdx.x * blockDim.x + threadIdx.x;
     const uint32_t y = blockIdx.y * blockDim.y + threadIdx.y;
@@ -767,14 +661,6 @@ extern "C" __global__ void renderKernel(
     if (x >= width || y >= height) return;
 
     const uint32_t pixel_idx = y * width + x;
-
-    // Initialize per-pixel metrics
-    TraversalMetrics metrics = {};
-
-    // Create traversal payload with metrics and neural data
-    TraversalPayload payload;
-    payload.metrics = &metrics;
-    payload.neural_data = neural_data;
 
     // Generate primary ray
     float u = (2.0f * ((float)x + 0.5f) / (float)width - 1.0f) * camera.aspect * tanf(camera.fov * 0.5f);
@@ -798,22 +684,13 @@ extern "C" __global__ void renderKernel(
     ray.direction.y /= len;
     ray.direction.z /= len;
 
-    // DEBUG: Print ray for center pixel to verify rays are correct
-    if (x == width/2 && y == height/2) {
-        printf("DEBUG: Center pixel (%d,%d) ray origin=(%f,%f,%f) dir=(%f,%f,%f)\n",
-               x, y, ray.origin.x, ray.origin.y, ray.origin.z,
-               ray.direction.x, ray.direction.y, ray.direction.z);
-        printf("DEBUG: scene=%p funcTable=%p neural_data=%p\n",
-               (void*)scene, (void*)funcTable, (void*)neural_data);
-    }
-
     // Create traversal object with payload for neural intersection
     hiprtSceneTraversalClosest traversal(
         scene,
         ray,
         hiprtFullRayMask,
         hiprtTraversalHintDefault,
-        &payload,  // Pass payload so custom intersection can access neural data
+        neural_data,  // Pass neural_data so custom intersection can access it
         funcTable,
         RAY_TYPE_PRIMARY,
         0.0f
@@ -821,18 +698,6 @@ extern "C" __global__ void renderKernel(
 
     // Get closest hit
     hiprtHit hit = traversal.getNextHit();
-
-    // DEBUG: Print hit result for center pixel
-    if (x == width/2 && y == height/2) {
-        printf("DEBUG: Center pixel hit=%d instanceID=%d primID=%d t=%f\n",
-               hit.hasHit() ? 1 : 0, hit.instanceID, hit.primID, hit.t);
-    }
-
-    // Track hit/miss divergence
-    metrics.node_divergence += measure_divergence(hit.hasHit());
-
-    // Compute instance entropy for spatial coherence
-    metrics.instance_entropy = warpInstanceEntropy(hit.hasHit() ? hit.instanceID : -1);
 
     // Compute color
     float3 color;
@@ -918,34 +783,33 @@ extern "C" __global__ void renderKernel(
         light_dir.y /= light_dist;
         light_dir.z /= light_dist;
 
-        // Shadow ray
-        hiprtRay shadow_ray;
-        shadow_ray.origin = hiprtFloat3{
-            hit_pos.x + 0.001f * normal.x,
-            hit_pos.y + 0.001f * normal.y,
-            hit_pos.z + 0.001f * normal.z
-        };
-        shadow_ray.direction = hiprtFloat3{light_dir.x, light_dir.y, light_dir.z};
-        shadow_ray.minT = 0.001f;
-        shadow_ray.maxT = light_dist - 0.001f;
+        // Shadow ray (optional)
+        bool in_shadow = false;
+        if (enable_shadows) {
+            hiprtRay shadow_ray;
+            shadow_ray.origin = hiprtFloat3{
+                hit_pos.x + 0.001f * normal.x,
+                hit_pos.y + 0.001f * normal.y,
+                hit_pos.z + 0.001f * normal.z
+            };
+            shadow_ray.direction = hiprtFloat3{light_dir.x, light_dir.y, light_dir.z};
+            shadow_ray.minT = 0.001f;
+            shadow_ray.maxT = light_dist - 0.001f;
 
-        metrics.shadow_tests++;
+            hiprtSceneTraversalAnyHit shadow_traversal(
+                scene,
+                shadow_ray,
+                hiprtFullRayMask,
+                hiprtTraversalHintShadowRays,
+                neural_data,
+                funcTable,
+                RAY_TYPE_SHADOW,
+                0.0f
+            );
 
-        hiprtSceneTraversalAnyHit shadow_traversal(
-            scene,
-            shadow_ray,
-            hiprtFullRayMask,
-            hiprtTraversalHintShadowRays,
-            &payload,
-            funcTable,
-            RAY_TYPE_SHADOW,
-            0.0f
-        );
-
-        hiprtHit shadow_hit = shadow_traversal.getNextHit();
-        bool in_shadow = shadow_hit.hasHit();
-
-        metrics.shadow_divergence += measure_divergence(in_shadow);
+            hiprtHit shadow_hit = shadow_traversal.getNextHit();
+            in_shadow = shadow_hit.hasHit();
+        }
 
         // Check if normal is valid, use fallback if not
         if (normal_len < 0.001f) {
@@ -983,9 +847,8 @@ extern "C" __global__ void renderKernel(
     pixel.z = (unsigned char)(fminf(fmaxf(color.z, 0.0f), 1.0f) * 255.0f);
     pixel.w = 255;
 
-    // Write outputs
+    // Write output
     frame_buffer[pixel_idx] = pixel;
-    metrics_buffer[pixel_idx] = metrics;
 }
 
 )KERNEL_SOURCE";
