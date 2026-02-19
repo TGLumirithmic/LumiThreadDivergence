@@ -6,10 +6,17 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CUDA_STANDARD 17)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 
-# Debug build flags
-set(CMAKE_BUILD_TYPE Release)
+# Default build type if not specified
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+    message(STATUS "Build type not specified, defaulting to Release")
+endif()
+
+# Build type specific flags
 set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -g -O0")
 set(CMAKE_CUDA_FLAGS_DEBUG "${CMAKE_CUDA_FLAGS_DEBUG} -g -G -O0 -lineinfo")
+set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3")
+set(CMAKE_CUDA_FLAGS_RELEASE "${CMAKE_CUDA_FLAGS_RELEASE} -O3 -lineinfo")
 
 # GPU Architecture Configuration
 # Tesla T4 / RTX 2080 Ti: 75, RTX 3090/4090: 86
@@ -121,10 +128,18 @@ message(STATUS "CUDA Architecture: ${CMAKE_CUDA_ARCHITECTURES}")
 message(STATUS "TCNN Half Precision: ${TCNN_HALF_PRECISION}")
 
 # ============================================================
-# Build output dirs
+# Build output dirs - separate Debug/Release binaries
 # ============================================================
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
+
+# Per-configuration output directories
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_DEBUG ${CMAKE_BINARY_DIR}/bin/Debug)
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_RELEASE ${CMAKE_BINARY_DIR}/bin/Release)
+set(CMAKE_LIBRARY_OUTPUT_DIRECTORY_DEBUG ${CMAKE_BINARY_DIR}/lib/Debug)
+set(CMAKE_LIBRARY_OUTPUT_DIRECTORY_RELEASE ${CMAKE_BINARY_DIR}/lib/Release)
+
+message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
 
 # ============================================================
 # Global include dirs
@@ -150,9 +165,31 @@ add_subdirectory(src/neural)
 # add_subdirectory(tests)
 
 # ============================================================
+# Generate kernel source file at build time for profiler source correlation
+# ============================================================
+set(KERNEL_SOURCE_OUTPUT "${CMAKE_SOURCE_DIR}/render_kernel")
+
+# Custom command to generate the kernel source file
+add_custom_command(
+    OUTPUT ${KERNEL_SOURCE_OUTPUT}
+    COMMAND ${CMAKE_COMMAND} -E echo "Generating kernel source file for profiler..."
+    COMMAND ${CMAKE_COMMAND}
+        -DKERNEL_SOURCE_H="${CMAKE_SOURCE_DIR}/src/hiprt/kernel_source.h"
+        -DOUTPUT_FILE="${KERNEL_SOURCE_OUTPUT}"
+        -P "${CMAKE_SOURCE_DIR}/cmake/extract_kernel_source.cmake"
+    DEPENDS ${CMAKE_SOURCE_DIR}/src/hiprt/kernel_source.h
+    COMMENT "Extracting kernel source to ${KERNEL_SOURCE_OUTPUT}"
+)
+
+add_custom_target(generate_kernel_source
+    DEPENDS ${KERNEL_SOURCE_OUTPUT}
+)
+
+# ============================================================
 # Main HIPRT renderer executable
 # ============================================================
 add_executable(renderer_hiprt src/main_hiprt.cpp)
+add_dependencies(renderer_hiprt generate_kernel_source)
 target_include_directories(renderer_hiprt PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/src
